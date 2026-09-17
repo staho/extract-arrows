@@ -15,7 +15,9 @@
       --muted: #4a6670;
       --panel: rgba(255, 255, 255, 0.72);
       --accent: #2a9d8f;
+      --accent-hover: #238b7e;
       --shadow: 0 12px 40px rgba(26, 47, 56, 0.12);
+      --radius: 14px;
     }
 
     * {
@@ -70,13 +72,57 @@
       border-radius: 999px;
       box-shadow: var(--shadow);
       user-select: none;
-      pointer-events: none;
+      pointer-events: auto;
+    }
+
+    #reset-btn {
+      position: relative;
+      z-index: 11;
+      min-width: 88px;
     }
 
     #hud .brand {
       font-weight: 700;
       font-size: 1rem;
       letter-spacing: 0.02em;
+    }
+
+    #hud .divider {
+      width: 1px;
+      height: 22px;
+      background: rgba(26, 47, 56, 0.15);
+    }
+
+    #remaining {
+      font-size: 0.95rem;
+      color: var(--muted);
+      font-weight: 500;
+    }
+
+    #remaining strong {
+      color: var(--ink);
+      font-weight: 700;
+    }
+
+    button {
+      font-family: inherit;
+      font-weight: 600;
+      font-size: 0.9rem;
+      border: none;
+      border-radius: 999px;
+      padding: 8px 16px;
+      background: var(--accent);
+      color: #fff;
+      cursor: pointer;
+      transition: background 0.15s ease, transform 0.15s ease;
+    }
+
+    button:hover {
+      background: var(--accent-hover);
+    }
+
+    button:active {
+      transform: scale(0.97);
     }
 
     #hint {
@@ -95,6 +141,54 @@
       pointer-events: none;
       opacity: 0.9;
     }
+
+    #win-modal {
+      position: absolute;
+      inset: 0;
+      z-index: 20;
+      display: grid;
+      place-items: center;
+      background: rgba(26, 47, 56, 0.35);
+      backdrop-filter: blur(6px);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.3s ease;
+    }
+
+    #win-modal.visible {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    #win-modal .card {
+      width: min(360px, calc(100% - 40px));
+      text-align: center;
+      padding: 32px 28px;
+      background: #fff;
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      transform: translateY(12px) scale(0.96);
+      transition: transform 0.3s ease;
+    }
+
+    #win-modal.visible .card {
+      transform: translateY(0) scale(1);
+    }
+
+    #win-modal h2 {
+      font-size: 1.6rem;
+      margin-bottom: 8px;
+    }
+
+    #win-modal p {
+      color: var(--muted);
+      margin-bottom: 22px;
+      line-height: 1.45;
+    }
+
+    #win-modal button {
+      padding: 10px 22px;
+    }
   </style>
 </head>
 <body>
@@ -102,9 +196,20 @@
 
   <div id="hud">
     <span class="brand">Arrow Out — Grid</span>
+    <span class="divider"></span>
+    <span id="remaining">Remaining: <strong>0</strong></span>
+    <button type="button" id="reset-btn">Reset</button>
   </div>
 
-  <div id="hint">Drag to orbit · Scroll to zoom</div>
+  <div id="hint">Drag to orbit · Click an arrow to remove it</div>
+
+  <div id="win-modal" role="dialog" aria-modal="true" aria-labelledby="win-title">
+    <div class="card">
+      <h2 id="win-title">Board cleared!</h2>
+      <p>Every arrow found its way out. Ready for another go?</p>
+      <button type="button" id="play-again-btn">Play Again</button>
+    </div>
+  </div>
 
   <script type="importmap">
   {
@@ -124,7 +229,15 @@
     const CELL = 1.15;
     const HALF = GRID / 2;
 
+    const params = new URLSearchParams(window.location.search);
+    const rawDev = params.get("dev");
+    const DEV_MODE = params.has("dev") && rawDev !== "0" && rawDev !== "false";
+
     const appEl = document.getElementById("app");
+    const remainingEl = document.querySelector("#remaining strong");
+    const resetBtn = document.getElementById("reset-btn");
+    const playAgainBtn = document.getElementById("play-again-btn");
+    const winModal = document.getElementById("win-modal");
 
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 200);
@@ -153,6 +266,9 @@
 
     const skeletonRoot = new THREE.Group();
     scene.add(skeletonRoot);
+
+    const boardRoot = new THREE.Group();
+    skeletonRoot.add(boardRoot);
 
     function buildLattice(size, cell) {
       const positions = [];
@@ -203,7 +319,16 @@
     }
 
     const lattice = buildLattice(GRID, CELL);
-    skeletonRoot.add(lattice);
+
+    function setGridVisible(visible) {
+      if (visible) {
+        if (!lattice.parent) skeletonRoot.add(lattice);
+      } else if (lattice.parent) {
+        skeletonRoot.remove(lattice);
+      }
+    }
+
+    setGridVisible(DEV_MODE);
 
     // Vibrant palette shared across arrows. Colours repeat (palette kept small);
     // an arrow's colour is just cosmetic and comes from the JSON.
@@ -216,17 +341,18 @@
       0x8338ec, // purple
     ];
 
-    const cellMaterials = PALETTE.map(
-      (color) =>
-        new THREE.MeshStandardMaterial({
-          color,
-          roughness: 0.45,
-          metalness: 0.1,
-        })
-    );
-
     const cubeEdge = CELL * 0.32;
     const cubeGeometry = new THREE.BoxGeometry(cubeEdge, cubeEdge, cubeEdge);
+    const hitGeometry = new THREE.BoxGeometry(
+      cubeEdge * 1.35,
+      cubeEdge * 1.35,
+      cubeEdge * 1.35
+    );
+    const hitMaterial = new THREE.MeshBasicMaterial({
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+    });
     const cellMin = -HALF * CELL;
 
     const cellCenter = (ix, iy, iz) =>
@@ -265,7 +391,48 @@
       return 2;
     }
 
-    function addConnector(a, b, material) {
+    function key(x, y, z) {
+      return `${x},${y},${z}`;
+    }
+
+    function inBounds(x, y, z) {
+      return x >= 0 && x < GRID && y >= 0 && y < GRID && z >= 0 && z < GRID;
+    }
+
+    /** @type {Map<string, Arrow>} cell key → arrow occupying that cell */
+    const occ = new Map();
+    /** @type {Map<number, Arrow>} */
+    const arrows = new Map();
+    let arrowIdSeq = 0;
+    let generationId = 0;
+    let puzzleData = null;
+
+    /**
+     * @typedef {{
+     *   id: number,
+     *   cells: number[][],
+     *   dir: THREE.Vector3,
+     *   mesh: THREE.Group,
+     *   busy: boolean,
+     *   bodyMat: THREE.MeshStandardMaterial,
+     *   baseColor: number,
+     * }} Arrow
+     */
+
+    function pathClearFrom(hx, hy, hz, dir) {
+      let cx = hx + dir.x;
+      let cy = hy + dir.y;
+      let cz = hz + dir.z;
+      while (inBounds(cx, cy, cz)) {
+        if (occ.has(key(cx, cy, cz))) return false;
+        cx += dir.x;
+        cy += dir.y;
+        cz += dir.z;
+      }
+      return true;
+    }
+
+    function addConnector(group, a, b, material) {
       const ax = axisIndex(a, b);
       const connector = new THREE.Mesh(connectorGeoms[ax], material);
       connector.position.set(
@@ -273,71 +440,347 @@
         cellMin + ((a[1] + b[1]) / 2 + 0.5) * CELL,
         cellMin + ((a[2] + b[2]) / 2 + 0.5) * CELL
       );
-      skeletonRoot.add(connector);
+      group.add(connector);
     }
 
-    function addArrow(arrow) {
-      const cells = arrow.cells;
-      if (!cells || cells.length === 0) return;
-      const material = cellMaterials[arrow.color % cellMaterials.length];
+    function addArrow(data) {
+      const cells = data.cells;
+      if (!cells || cells.length < 2) return;
+
+      const colorHex = PALETTE[data.color % PALETTE.length];
+      const bodyMat = new THREE.MeshStandardMaterial({
+        color: colorHex,
+        roughness: 0.45,
+        metalness: 0.1,
+      });
+
+      const group = new THREE.Group();
+      const id = (arrowIdSeq += 1);
+      group.userData.arrowId = id;
 
       for (const [ix, iy, iz] of cells) {
-        const cube = new THREE.Mesh(cubeGeometry, material);
+        const cube = new THREE.Mesh(cubeGeometry, bodyMat);
         cube.position.copy(cellCenter(ix, iy, iz));
-        skeletonRoot.add(cube);
+        group.add(cube);
+
+        const hit = new THREE.Mesh(hitGeometry, hitMaterial);
+        hit.position.copy(cube.position);
+        hit.userData.isHitProxy = true;
+        group.add(hit);
       }
 
       for (let i = 0; i < cells.length - 1; i++) {
-        addConnector(cells[i], cells[i + 1], material);
+        addConnector(group, cells[i], cells[i + 1], bodyMat);
       }
 
       // Arrowhead: cells are stored head-first, so it points from the head away
       // from the body (cells[0] - cells[1]) and sits just beyond the head cube.
-      if (cells.length >= 2) {
-        const [hx, hy, hz] = cells[0];
-        const [nx, ny, nz] = cells[1];
-        const dir = new THREE.Vector3(hx - nx, hy - ny, hz - nz).normalize();
-        const cone = new THREE.Mesh(coneGeometry, material);
-        cone.quaternion.setFromUnitVectors(CONE_UP, dir);
-        cone.position
-          .copy(cellCenter(hx, hy, hz))
-          .addScaledVector(dir, cubeEdge / 2 + coneHeight / 2);
-        skeletonRoot.add(cone);
+      const [hx, hy, hz] = cells[0];
+      const [nx, ny, nz] = cells[1];
+      const dir = new THREE.Vector3(hx - nx, hy - ny, hz - nz);
+      const unit = dir.clone().normalize();
+      const cone = new THREE.Mesh(coneGeometry, bodyMat);
+      cone.quaternion.setFromUnitVectors(CONE_UP, unit);
+      cone.position
+        .copy(cellCenter(hx, hy, hz))
+        .addScaledVector(unit, cubeEdge / 2 + coneHeight / 2);
+      group.add(cone);
+
+      boardRoot.add(group);
+
+      /** @type {Arrow} */
+      const arrow = {
+        id,
+        cells,
+        dir,
+        mesh: group,
+        busy: false,
+        bodyMat,
+        baseColor: colorHex,
+      };
+      arrows.set(id, arrow);
+      for (const [x, y, z] of cells) {
+        occ.set(key(x, y, z), arrow);
       }
     }
 
-    // Load the arrow set from a static JSON file and render it. Generation lives
-    // in tools/generate-arrows.mjs; this page only draws what the file describes.
-    try {
-      const res = await fetch("./arrows.json", { cache: "no-cache" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
+    function disposeArrowMaterials(arrow) {
+      gsap.killTweensOf(arrow.mesh.position);
+      gsap.killTweensOf(arrow.mesh.scale);
+      gsap.killTweensOf(arrow.bodyMat.color);
+      arrow.bodyMat.dispose();
+    }
+
+    function clearBoard() {
+      generationId += 1;
+      for (const arrow of arrows.values()) {
+        if (arrow.mesh.parent) boardRoot.remove(arrow.mesh);
+        disposeArrowMaterials(arrow);
+      }
+      arrows.clear();
+      occ.clear();
+    }
+
+    function buildBoard(data) {
+      clearBoard();
+      hideWin();
       if (data.grid && data.grid !== GRID) {
         console.warn(
           `arrows.json grid (${data.grid}) differs from lattice grid (${GRID}); ` +
             "positions may not align with the wireframe."
         );
       }
-      for (const arrow of data.arrows) addArrow(arrow);
+      for (const arrow of data.arrows || []) addArrow(arrow);
+      updateRemaining();
+    }
+
+    function resetBoard() {
+      if (!puzzleData) return;
+      buildBoard(puzzleData);
+    }
+
+    function updateRemaining() {
+      remainingEl.textContent = String(arrows.size);
+    }
+
+    function showWin() {
+      winModal.classList.add("visible");
+    }
+
+    function hideWin() {
+      winModal.classList.remove("visible");
+    }
+
+    function tryRemove(arrow) {
+      const [hx, hy, hz] = arrow.cells[0];
+      if (pathClearFrom(hx, hy, hz, arrow.dir)) {
+        escapeArrow(arrow);
+      } else {
+        errorArrow(arrow);
+      }
+    }
+
+    function escapeArrow(arrow) {
+      if (arrow.busy) return;
+      arrow.busy = true;
+      const mesh = arrow.mesh;
+      const gen = generationId;
+      const arrowId = arrow.id;
+
+      for (const [x, y, z] of arrow.cells) {
+        const k = key(x, y, z);
+        if (occ.get(k) === arrow) occ.delete(k);
+      }
+      arrows.delete(arrow.id);
+      updateRemaining();
+      const clearedBoard = arrows.size === 0;
+
+      mesh.traverse((child) => {
+        child.raycast = () => {};
+      });
+
+      const end = mesh.position
+        .clone()
+        .add(arrow.dir.clone().normalize().multiplyScalar(GRID * CELL));
+
+      gsap.to(mesh.position, {
+        x: end.x,
+        y: end.y,
+        z: end.z,
+        duration: 0.55,
+        ease: "power2.in",
+        onComplete: () => {
+          if (gen !== generationId || mesh.userData.arrowId !== arrowId) return;
+          if (mesh.parent) boardRoot.remove(mesh);
+          disposeArrowMaterials(arrow);
+          if (clearedBoard && gen === generationId) showWin();
+        },
+      });
+
+      gsap.to(mesh.scale, {
+        x: 0.7,
+        y: 0.7,
+        z: 0.7,
+        duration: 0.55,
+        ease: "power1.in",
+      });
+    }
+
+    function errorArrow(arrow) {
+      arrow.busy = true;
+      const mesh = arrow.mesh;
+      const origin = mesh.position.clone();
+      const nudge = arrow.dir.clone().normalize().multiplyScalar(0.1);
+      const bodyMat = arrow.bodyMat;
+      const original = bodyMat.color.getHex();
+      const gen = generationId;
+      const arrowId = arrow.id;
+
+      bodyMat.color.setHex(0xe76f51);
+
+      const tl = gsap.timeline({
+        onComplete: () => {
+          if (gen !== generationId || mesh.userData.arrowId !== arrowId) return;
+          mesh.position.copy(origin);
+          bodyMat.color.setHex(original);
+          arrow.busy = false;
+        },
+      });
+
+      tl.to(mesh.position, {
+        x: origin.x + nudge.x,
+        y: origin.y + nudge.y,
+        z: origin.z + nudge.z,
+        duration: 0.1,
+        ease: "power1.out",
+      });
+
+      const perp =
+        Math.abs(arrow.dir.y) < 0.5
+          ? new THREE.Vector3(0, 1, 0)
+          : new THREE.Vector3(1, 0, 0);
+      const side = new THREE.Vector3()
+        .crossVectors(arrow.dir, perp)
+        .normalize()
+        .multiplyScalar(0.08);
+
+      tl.to(mesh.position, {
+        x: origin.x + nudge.x + side.x,
+        y: origin.y + nudge.y + side.y,
+        z: origin.z + nudge.z + side.z,
+        duration: 0.06,
+        yoyo: true,
+        repeat: 5,
+        ease: "power1.inOut",
+      });
+
+      tl.to(mesh.position, {
+        x: origin.x,
+        y: origin.y,
+        z: origin.z,
+        duration: 0.16,
+        ease: "power2.out",
+      });
+
+      tl.to(
+        {},
+        {
+          duration: 0.2,
+          onStart: () => {
+            gsap.to(bodyMat.color, {
+              r: ((original >> 16) & 255) / 255,
+              g: ((original >> 8) & 255) / 255,
+              b: (original & 255) / 255,
+              duration: 0.25,
+              ease: "power1.out",
+            });
+          },
+        },
+        "<"
+      );
+    }
+
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
+    let pointerDown = null;
+
+    function setPointerFromEvent(event) {
+      const rect = renderer.domElement.getBoundingClientRect();
+      pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    }
+
+    function onPointerDown(event) {
+      if (event.button !== 0) return;
+      pointerDown = { x: event.clientX, y: event.clientY };
+    }
+
+    function findArrowFromHit(hitObject) {
+      let obj = hitObject;
+      while (obj && obj.parent !== boardRoot) obj = obj.parent;
+      if (!obj || obj.userData.arrowId == null) return null;
+      return arrows.get(obj.userData.arrowId) || null;
+    }
+
+    function onPointerUp(event) {
+      if (event.button !== 0 || !pointerDown) return;
+      const dx = event.clientX - pointerDown.x;
+      const dy = event.clientY - pointerDown.y;
+      pointerDown = null;
+
+      if (Math.hypot(dx, dy) >= 5) return;
+      if (winModal.classList.contains("visible")) return;
+
+      setPointerFromEvent(event);
+      raycaster.setFromCamera(pointer, camera);
+      const hits = raycaster.intersectObjects(boardRoot.children, true);
+      for (const hit of hits) {
+        const arrow = findArrowFromHit(hit.object);
+        if (!arrow || arrow.busy) continue;
+        tryRemove(arrow);
+        return;
+      }
+    }
+
+    function autoSolveStep() {
+      for (const arrow of arrows.values()) {
+        if (arrow.busy) continue;
+        const [hx, hy, hz] = arrow.cells[0];
+        if (pathClearFrom(hx, hy, hz, arrow.dir)) {
+          escapeArrow(arrow);
+          return true;
+        }
+      }
+      return false;
+    }
+
+    window.__arrowOut = {
+      reset: () => resetBoard(),
+      remaining: () => arrows.size,
+      autoSolveStep,
+      autoSolveAll: async () => {
+        while (arrows.size > 0) {
+          if (!autoSolveStep()) break;
+          await new Promise((r) => setTimeout(r, 600));
+        }
+      },
+      setGridVisible,
+    };
+
+    renderer.domElement.addEventListener("pointerdown", onPointerDown);
+    renderer.domElement.addEventListener("pointerup", onPointerUp);
+    renderer.domElement.addEventListener("pointercancel", () => {
+      pointerDown = null;
+    });
+
+    resetBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      resetBoard();
+      remainingEl.animate(
+        [{ transform: "scale(1)" }, { transform: "scale(1.2)" }, { transform: "scale(1)" }],
+        { duration: 280 }
+      );
+    });
+    playAgainBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      resetBoard();
+    });
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "r" || e.key === "R") resetBoard();
+    });
+
+    // Load the arrow set from a static JSON file and render it. Generation lives
+    // in tools/generate-arrows.mjs; this page only draws what the file describes.
+    try {
+      const res = await fetch("./arrows.json", { cache: "no-cache" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      puzzleData = await res.json();
+      buildBoard(puzzleData);
     } catch (err) {
       console.error("Failed to load arrows.json:", err);
     }
-
-    // Subtle idle hover so the skeleton feels suspended
-    gsap.to(skeletonRoot.position, {
-      y: 0.14,
-      duration: 2.8,
-      ease: "sine.inOut",
-      yoyo: true,
-      repeat: -1,
-    });
-    gsap.to(skeletonRoot.rotation, {
-      y: 0.045,
-      duration: 4.2,
-      ease: "sine.inOut",
-      yoyo: true,
-      repeat: -1,
-    });
 
     function resize() {
       const w = window.innerWidth;

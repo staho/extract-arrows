@@ -1,0 +1,9 @@
+{
+  "name": "arrow-out-2",
+  "compatibility_date": "2026-09-17",
+  "assets": { "directory": "." },
+  "routes": [
+    { "pattern": "arrow-out-2.staho.dev", "custom_domain": true }
+  ]
+}
+

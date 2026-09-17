@@ -1,0 +1,187 @@
+name: Deploy Games (PR)
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - closed
+    paths:
+      - "games/**"
+      - ".github/workflows/deploy-games-pr.yml"
+
+# Same-repo PRs only (forks cannot use repository secrets)
+concurrency:
+  group: deploy-games-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  detect:
+    if: >
+      github.event.action != 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    outputs:
+      games: ${{ steps.detect.outputs.games }}
+      has_games: ${{ steps.detect.outputs.has_games }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect games to deploy
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          is_valid_game() {
+            local dir="$1"
+            [[ -f "$dir/index.html" && -f "$dir/wrangler.jsonc" ]]
+          }
+
+          games=()
+
+          list_all_games() {
+            local dir
+            for dir in games/*/; do
+              [[ -d "$dir" ]] || continue
+              if is_valid_game "$dir"; then
+                games+=("$(basename "$dir")")
+              fi
+            done
+          }
+
+          base_sha="${{ github.event.pull_request.base.sha }}"
+
+          # Redeploy every game when the PR workflow itself changes
+          if git diff --name-only "$base_sha" "${{ github.sha }}" -- .github/workflows/deploy-games-pr.yml | grep -q .; then
+            list_all_games
+          else
+            mapfile -t changed_dirs < <(
+              git diff --name-only "$base_sha" "${{ github.sha }}" -- games/ \
+                | awk -F/ 'NF>=2 { print $2 }' \
+                | sort -u
+            )
+
+            for slug in "${changed_dirs[@]+"${changed_dirs[@]}"}"; do
+              [[ -n "$slug" ]] || continue
+              if is_valid_game "games/$slug"; then
+                games+=("$slug")
+              fi
+            done
+          fi
+
+          if [[ ${#games[@]} -eq 0 ]]; then
+            echo "games=[]" >> "$GITHUB_OUTPUT"
+            echo "has_games=false" >> "$GITHUB_OUTPUT"
+            echo "No games to deploy."
+          else
+            json=$(printf '%s\n' "${games[@]}" | jq -R . | jq -sc .)
+            echo "games=$json" >> "$GITHUB_OUTPUT"
+            echo "has_games=true" >> "$GITHUB_OUTPUT"
+            echo "Games to deploy: $json"
+          fi
+
+  deploy:
+    needs: detect
+    if: needs.detect.outputs.has_games == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        game: ${{ fromJson(needs.detect.outputs.games) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Patch wrangler for PR preview
+        working-directory: games/${{ matrix.game }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          preview_name="${{ matrix.game }}-pr-${{ github.event.pull_request.number }}"
+          # Strip // comments so jq can parse jsonc
+          sed 's|//.*||' wrangler.jsonc | jq --arg name "$preview_name" \
+            '.name = $name | .routes = [{pattern: ($name + ".staho.dev"), custom_domain: true}]' \
+            > wrangler.jsonc.tmp
+          mv wrangler.jsonc.tmp wrangler.jsonc
+          echo "Preview Worker: $preview_name"
+          cat wrangler.jsonc
+
+      - name: Deploy ${{ matrix.game }} preview
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: games/${{ matrix.game }}
+          # Assets-only Workers (no `main`) require Wrangler 4+
+          wranglerVersion: "4"
+
+  comment:
+    needs: [detect, deploy]
+    if: >
+      always() &&
+      needs.detect.outputs.has_games == 'true' &&
+      needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build preview URL list
+        id: urls
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr="${{ github.event.pull_request.number }}"
+          body="## Game preview deployments"$'\n\n'
+          body+="PR \`#${pr}\` previews (Worker / domain suffix \`-pr-${pr}\`):"$'\n\n'
+          while IFS= read -r game; do
+            [[ -n "$game" ]] || continue
+            body+="- [\`${game}-pr-${pr}.staho.dev\`](https://${game}-pr-${pr}.staho.dev)"$'\n'
+          done < <(echo '${{ needs.detect.outputs.games }}' | jq -r '.[]')
+          body+=$'\n'"These Workers are deleted automatically when the PR is closed."
+          {
+            echo "body<<EOF"
+            echo "$body"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Comment preview URLs on PR
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: deploy-games-pr-previews
+          message: ${{ steps.urls.outputs.body }}
+
+  cleanup:
+    if: >
+      github.event.action == 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cleanup preview Workers for PR
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr="${{ github.event.pull_request.number }}"
+
+          for dir in games/*/; do
+            [[ -d "$dir" ]] || continue
+            if [[ ! -f "$dir/index.html" || ! -f "$dir/wrangler.jsonc" ]]; then
+              continue
+            fi
+            slug="$(basename "$dir")"
+            name="${slug}-pr-${pr}"
+            echo "Deleting preview Worker: $name"
+            # Ignore failures when the Worker was never deployed for this PR
+            npx --yes wrangler@4 delete --name "$name" --force || true
+          done
