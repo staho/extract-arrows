@@ -1,0 +1,11 @@
+{
+  "name": "extract-arrows",
+  "version": "0.1.0",
+  "private": true,
+  "description": "3D interlocking arrow-extraction puzzle (static site + arrow generator).",
+  "type": "module",
+  "scripts": {
+    "generate": "node games/arrow-out-2/tools/generate-arrows.mjs",
+    "serve": "python3 -m http.server 8000"
+  }
+}
