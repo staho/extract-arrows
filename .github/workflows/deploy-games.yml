@@ -33,32 +33,40 @@ jobs:
 
           games=()
 
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          list_all_games() {
+            local dir
             for dir in games/*/; do
               [[ -d "$dir" ]] || continue
               if is_valid_game "$dir"; then
                 games+=("$(basename "$dir")")
               fi
             done
+          }
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            list_all_games
           else
             before="${{ github.event.before }}"
-            if [[ -z "$before" || "$before" =~ ^0+$ ]]; then
-              # First commit on the branch / no usable before SHA: treat all valid games as changed
-              mapfile -t changed_dirs < <(find games -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -u)
+            # Redeploy every game when the workflow itself changes (tooling/config fixes)
+            if [[ -n "$before" && ! "$before" =~ ^0+$ ]] && \
+               git diff --name-only "$before" "${{ github.sha }}" -- .github/workflows/deploy-games.yml | grep -q .; then
+              list_all_games
+            elif [[ -z "$before" || "$before" =~ ^0+$ ]]; then
+              list_all_games
             else
               mapfile -t changed_dirs < <(
                 git diff --name-only "$before" "${{ github.sha }}" -- games/ \
                   | awk -F/ 'NF>=2 { print $2 }' \
                   | sort -u
               )
-            fi
 
-            for slug in "${changed_dirs[@]+"${changed_dirs[@]}"}"; do
-              [[ -n "$slug" ]] || continue
-              if is_valid_game "games/$slug"; then
-                games+=("$slug")
-              fi
-            done
+              for slug in "${changed_dirs[@]+"${changed_dirs[@]}"}"; do
+                [[ -n "$slug" ]] || continue
+                if is_valid_game "games/$slug"; then
+                  games+=("$slug")
+                fi
+              done
+            fi
           fi
 
           if [[ ${#games[@]} -eq 0 ]]; then
