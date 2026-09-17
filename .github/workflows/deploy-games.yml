@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "games/**"
+      - ".github/workflows/deploy-games.yml"
   workflow_dispatch:
 
 jobs:
@@ -89,3 +90,5 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: games/${{ matrix.game }}
+          # Assets-only Workers (no `main`) require Wrangler 4+
+          wranglerVersion: "4"
