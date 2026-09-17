@@ -7,10 +7,12 @@
 // cells[0] is the head, the rest is the body. The head's facing direction is
 // cells[0] - cells[1].
 //
-// How the full fill works: we build a serpentine Hamiltonian path that visits
-// every cell exactly once (with a random axis permutation / reflections for
-// variety), then chop it into consecutive segments of length MIN_LEN..MAX_LEN.
-// That guarantees 100% coverage with no gaps and no overlaps.
+// How the full fill works: we build a random Hamiltonian path that wanders
+// through every cell exactly once (randomized Warnsdorff DFS with backtracking),
+// then chop it into consecutive segments of length MIN_LEN..MAX_LEN. That
+// guarantees 100% coverage with no gaps or overlaps while keeping the arrows
+// varied in direction (a serpentine fallback is used only if the randomized
+// search fails to complete within its budget).
 //
 // Head orientation ("no head points directly at another arrow"): in a fully
 // packed cube this rule can only hold for arrows whose head sits on the surface
@@ -33,6 +35,8 @@ const PALETTE_SIZE = 6;
 const MIN_LEN = 3;
 const MAX_LEN = 6;
 
+const N = GRID * GRID * GRID;
+
 const idx = (x, y, z) => (x * GRID + y) * GRID + z;
 const inBounds = (x, y, z) =>
   x >= 0 && x < GRID && y >= 0 && y < GRID && z >= 0 && z < GRID;
@@ -40,24 +44,76 @@ const inBounds = (x, y, z) =>
 const randInt = (n) => Math.floor(Math.random() * n);
 const randBool = () => Math.random() < 0.5;
 
-function shuffle(arr) {
-  const a = arr.slice();
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = randInt(i + 1);
-    [a[i], a[j]] = [a[j], a[i]];
+const DIRS = [
+  [1, 0, 0],
+  [-1, 0, 0],
+  [0, 1, 0],
+  [0, -1, 0],
+  [0, 0, 1],
+  [0, 0, -1],
+];
+
+function neighborsOf([x, y, z]) {
+  const out = [];
+  for (const [dx, dy, dz] of DIRS) {
+    const nx = x + dx;
+    const ny = y + dy;
+    const nz = z + dz;
+    if (inBounds(nx, ny, nz)) out.push([nx, ny, nz]);
   }
-  return a;
+  return out;
 }
 
-// --- 1. Serpentine Hamiltonian path over every cell. ---
-// Canonical order visits axis roles (a=outer, b=middle, c=inner). The middle
-// axis reverses each outer step and the inner axis reverses each middle step so
-// that consecutive cells always differ by 1 on exactly one axis. A random axis
-// permutation and per-axis reflections (both grid automorphisms that preserve
-// adjacency) vary the layout between runs.
+// Ordered list of moves from `cell`, unvisited-first via Warnsdorff (fewest
+// onward unvisited neighbours first) with random tie-breaks so each run differs.
+function orderedCandidates(cell, visited) {
+  const scored = [];
+  for (const c of neighborsOf(cell)) {
+    if (visited[idx(c[0], c[1], c[2])]) continue;
+    let degree = 0;
+    for (const n of neighborsOf(c)) {
+      if (!visited[idx(n[0], n[1], n[2])]) degree++;
+    }
+    scored.push({ c, degree, r: Math.random() });
+  }
+  scored.sort((a, b) => a.degree - b.degree || a.r - b.r);
+  return scored.map((s) => s.c);
+}
+
+// --- 1a. Random Hamiltonian path over every cell (iterative DFS + backtrack). ---
+function randomHamiltonian(maxSteps) {
+  const visited = new Uint8Array(N);
+  const start = [randInt(GRID), randInt(GRID), randInt(GRID)];
+  visited[idx(start[0], start[1], start[2])] = 1;
+  const path = [start];
+  const frames = [{ cands: orderedCandidates(start, visited), i: 0 }];
+
+  let steps = 0;
+  while (path.length < N) {
+    if (++steps > maxSteps) return null;
+    const frame = frames[frames.length - 1];
+    let advanced = false;
+    while (frame.i < frame.cands.length) {
+      const c = frame.cands[frame.i++];
+      if (visited[idx(c[0], c[1], c[2])]) continue;
+      visited[idx(c[0], c[1], c[2])] = 1;
+      path.push(c);
+      frames.push({ cands: orderedCandidates(c, visited), i: 0 });
+      advanced = true;
+      break;
+    }
+    if (!advanced) {
+      const dead = path.pop();
+      visited[idx(dead[0], dead[1], dead[2])] = 0;
+      frames.pop();
+      if (frames.length === 0) return null;
+    }
+  }
+  return path;
+}
+
+// --- 1b. Serpentine fallback (guaranteed) if the random search runs out of budget. ---
 function serpentinePath() {
-  const axisOf = shuffle([0, 1, 2]); // axisOf[roleIndex] = world axis
-  const flip = [randBool(), randBool(), randBool()];
   const path = [];
   for (let a = 0; a < GRID; a++) {
     const bAsc = a % 2 === 0;
@@ -66,16 +122,20 @@ function serpentinePath() {
       const cAsc = (a + b) % 2 === 0;
       for (let ci = 0; ci < GRID; ci++) {
         const c = cAsc ? ci : GRID - 1 - ci;
-        const v = [0, 0, 0];
-        v[axisOf[0]] = a;
-        v[axisOf[1]] = b;
-        v[axisOf[2]] = c;
-        for (let d = 0; d < 3; d++) if (flip[d]) v[d] = GRID - 1 - v[d];
-        path.push(v);
+        path.push([a, b, c]);
       }
     }
   }
   return path;
+}
+
+function buildHamiltonian() {
+  for (let attempt = 0; attempt < 60; attempt++) {
+    const p = randomHamiltonian(60 * N);
+    if (p) return p;
+  }
+  console.warn("Random Hamiltonian search exhausted; using serpentine fallback.");
+  return serpentinePath();
 }
 
 // --- 2. Chop the path into arrow-length segments (each in [MIN_LEN, MAX_LEN]). ---
@@ -96,7 +156,7 @@ function segmentLengths(total) {
   return lens;
 }
 
-const path = serpentinePath();
+const path = buildHamiltonian();
 
 // occ[cell] = arrow id occupying it, or -1 when empty.
 const occ = new Int16Array(GRID * GRID * GRID).fill(-1);
