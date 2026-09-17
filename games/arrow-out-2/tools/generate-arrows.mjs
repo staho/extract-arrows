@@ -13,8 +13,8 @@
 // nose-jammed deadlock while still allowing interlocking (blockers further
 // along the exit path are permitted).
 //
-// Usage: node tools/generate-arrows.mjs [outfile]
-//   default outfile: arrows.json (repo root)
+// Usage: node games/arrow-out-2/tools/generate-arrows.mjs [outfile]
+//   default outfile: ../arrows.json (games/arrow-out-2/arrows.json)
 
 import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";

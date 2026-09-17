@@ -5,7 +5,7 @@
   "description": "3D interlocking arrow-extraction puzzle (static site + arrow generator).",
   "type": "module",
   "scripts": {
-    "generate": "node tools/generate-arrows.mjs",
+    "generate": "node games/arrow-out-2/tools/generate-arrows.mjs",
     "serve": "python3 -m http.server 8000"
   }
 }
