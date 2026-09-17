@@ -126,6 +126,39 @@
       transform: scale(0.97);
     }
 
+    #size-picker {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px;
+      background: rgba(26, 47, 56, 0.06);
+      border-radius: 999px;
+    }
+
+    #size-picker button {
+      min-width: 36px;
+      padding: 6px 10px;
+      background: transparent;
+      color: var(--muted);
+      font-size: 0.85rem;
+      font-variant-numeric: tabular-nums;
+    }
+
+    #size-picker button:hover {
+      background: rgba(42, 157, 143, 0.15);
+      color: var(--ink);
+    }
+
+    #size-picker button.active {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    #size-picker button.active:hover {
+      background: var(--accent-hover);
+      color: #fff;
+    }
+
     #hint {
       position: absolute;
       bottom: 22px;
@@ -199,6 +232,12 @@
     <span class="brand">Arrow Out</span>
     <span class="divider"></span>
     <span id="remaining">Remaining: <strong>0</strong></span>
+    <span class="divider"></span>
+    <div id="size-picker" role="group" aria-label="Cube size">
+      <button type="button" data-size="3" class="active" aria-pressed="true" title="3×3×3">3³</button>
+      <button type="button" data-size="4" aria-pressed="false" title="4×4×4">4³</button>
+      <button type="button" data-size="5" aria-pressed="false" title="5×5×5">5³</button>
+    </div>
     <button type="button" id="reset-btn">Reset</button>
   </div>
 
@@ -228,7 +267,7 @@
 
     const CELL = 1.15;
     const BLOCK_SIZE = 0.78;
-    const COORDS = [-1, 0, 1];
+    const ALLOWED_SIZES = [3, 4, 5];
     const DIRS = [
       new THREE.Vector3(1, 0, 0),
       new THREE.Vector3(-1, 0, 0),
@@ -252,10 +291,20 @@
     const resetBtn = document.getElementById("reset-btn");
     const playAgainBtn = document.getElementById("play-again-btn");
     const winModal = document.getElementById("win-modal");
+    const sizePicker = document.getElementById("size-picker");
+
+    function parseSizeParam() {
+      const raw = new URLSearchParams(window.location.search).get("size");
+      const n = raw == null || raw === "" ? NaN : Number(raw);
+      if (!Number.isFinite(n)) return 3;
+      const rounded = Math.floor(n);
+      return ALLOWED_SIZES.includes(rounded) ? rounded : 3;
+    }
+
+    let SIZE = parseSizeParam();
 
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
-    camera.position.set(5.2, 4.2, 5.8);
+    const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 200);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -266,10 +315,18 @@
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
-    controls.minDistance = 4;
-    controls.maxDistance = 14;
     controls.target.set(0, 0, 0);
-    controls.update();
+
+    function frameCameraForSize() {
+      const extent = SIZE * CELL;
+      const dist = extent * 1.85;
+      camera.position.set(dist * 0.72, dist * 0.58, dist * 0.8);
+      controls.minDistance = Math.max(3, extent * 0.9);
+      controls.maxDistance = Math.max(14, extent * 4);
+      controls.update();
+    }
+
+    frameCameraForSize();
 
     scene.add(new THREE.AmbientLight(0xffffff, 0.72));
     const keyLight = new THREE.DirectionalLight(0xffffff, 0.85);
@@ -297,11 +354,12 @@
     }
 
     function worldPos(x, y, z) {
-      return new THREE.Vector3(x * CELL, y * CELL, z * CELL);
+      const c = (SIZE - 1) / 2;
+      return new THREE.Vector3((x - c) * CELL, (y - c) * CELL, (z - c) * CELL);
     }
 
     function isInside(x, y, z) {
-      return COORDS.includes(x) && COORDS.includes(y) && COORDS.includes(z);
+      return x >= 0 && x < SIZE && y >= 0 && y < SIZE && z >= 0 && z < SIZE;
     }
 
     function pathClearFrom(x, y, z, dir) {
@@ -340,12 +398,13 @@
     }
 
     function getTargetCount() {
+      const capacity = SIZE * SIZE * SIZE;
       const params = new URLSearchParams(window.location.search);
       const rawCount = params.get("count");
       const requested = rawCount == null || rawCount === "" ? NaN : Number(rawCount);
       return Number.isFinite(requested) && requested > 0
-        ? Math.min(27, Math.max(1, Math.floor(requested)))
-        : 27;
+        ? Math.min(capacity, Math.max(1, Math.floor(requested)))
+        : capacity;
     }
 
     function tryBuildPuzzle() {
@@ -353,9 +412,9 @@
       const gen = generationId;
 
       const cells = [];
-      for (const x of COORDS) {
-        for (const y of COORDS) {
-          for (const z of COORDS) {
+      for (let x = 0; x < SIZE; x += 1) {
+        for (let y = 0; y < SIZE; y += 1) {
+          for (let z = 0; z < SIZE; z += 1) {
             cells.push({ x, y, z });
           }
         }
@@ -363,7 +422,7 @@
 
       const targetCount = getTargetCount();
       let attempts = 0;
-      const maxAttempts = 8000;
+      const maxAttempts = 8000 * SIZE;
 
       while (grid.size < targetCount && attempts < maxAttempts) {
         attempts += 1;
@@ -591,7 +650,9 @@
         child.raycast = () => {};
       });
 
-      const end = mesh.position.clone().add(block.dir.clone().multiplyScalar(10));
+      const end = mesh.position.clone().add(
+        block.dir.clone().multiplyScalar(SIZE * CELL * 2.5)
+      );
 
       gsap.to(mesh.position, {
         x: end.x,
@@ -719,6 +780,10 @@
     window.__arrowOut = {
       reset: () => generatePuzzle(),
       remaining: () => grid.size,
+      get size() {
+        return SIZE;
+      },
+      setSize: (next) => setSize(next),
       autoSolveStep,
       autoSolveAll: async () => {
         while (grid.size > 0) {
@@ -727,6 +792,33 @@
         }
       },
     };
+
+    function syncSizeUrl() {
+      const url = new URL(window.location.href);
+      if (SIZE === 3) url.searchParams.delete("size");
+      else url.searchParams.set("size", String(SIZE));
+      history.replaceState(null, "", url);
+    }
+
+    function syncSizeButtons() {
+      for (const btn of sizePicker.querySelectorAll("button[data-size]")) {
+        const n = Number(btn.dataset.size);
+        const active = n === SIZE;
+        btn.classList.toggle("active", active);
+        btn.setAttribute("aria-pressed", active ? "true" : "false");
+      }
+    }
+
+    function setSize(next) {
+      const n = Math.floor(Number(next));
+      if (!ALLOWED_SIZES.includes(n) || n === SIZE) return false;
+      SIZE = n;
+      syncSizeButtons();
+      syncSizeUrl();
+      frameCameraForSize();
+      generatePuzzle();
+      return true;
+    }
 
     renderer.domElement.addEventListener("pointerdown", onPointerDown);
     renderer.domElement.addEventListener("pointerup", onPointerUp);
@@ -748,11 +840,19 @@
       e.stopPropagation();
       generatePuzzle();
     });
+    sizePicker.addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-size]");
+      if (!btn) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setSize(btn.dataset.size);
+    });
 
     window.addEventListener("keydown", (e) => {
       if (e.key === "r" || e.key === "R") generatePuzzle();
     });
 
+    syncSizeButtons();
     onResize();
     generatePuzzle();
     animate();
