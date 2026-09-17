@@ -205,7 +205,7 @@
     const lattice = buildLattice(GRID, CELL);
     skeletonRoot.add(lattice);
 
-    // Fill every grid cell with a smaller vibrant cube (75% of the cell volume).
+    // Place a small vibrant cube at the center of every grid cell.
     // Colors are drawn from a small shared palette so hues repeat across cubes.
     const PALETTE = [
       0xff3b3b, // red
@@ -225,7 +225,7 @@
         })
     );
 
-    const cubeEdge = CELL * Math.cbrt(0.75);
+    const cubeEdge = CELL * 0.32;
     const cubeGeometry = new THREE.BoxGeometry(cubeEdge, cubeEdge, cubeEdge);
     const cellMin = -HALF * CELL;
 
