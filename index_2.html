@@ -205,8 +205,8 @@
     const lattice = buildLattice(GRID, CELL);
     skeletonRoot.add(lattice);
 
-    // Place a small vibrant cube at the center of every grid cell.
-    // Colors are drawn from a small shared palette so hues repeat across cubes.
+    // Vibrant palette shared across arrows. Colours repeat (palette kept small);
+    // an arrow's colour is just cosmetic and comes from the JSON.
     const PALETTE = [
       0xff3b3b, // red
       0xff9f1c, // orange
@@ -229,7 +229,6 @@
     const cubeGeometry = new THREE.BoxGeometry(cubeEdge, cubeEdge, cubeEdge);
     const cellMin = -HALF * CELL;
 
-    const cellIndex = (ix, iy, iz) => (ix * GRID + iy) * GRID + iz;
     const cellCenter = (ix, iy, iz) =>
       new THREE.Vector3(
         cellMin + (ix + 0.5) * CELL,
@@ -237,24 +236,8 @@
         cellMin + (iz + 0.5) * CELL
       );
 
-    const colorOf = new Int8Array(GRID * GRID * GRID);
-
-    for (let ix = 0; ix < GRID; ix++) {
-      for (let iy = 0; iy < GRID; iy++) {
-        for (let iz = 0; iz < GRID; iz++) {
-          const ci = Math.floor(Math.random() * cellMaterials.length);
-          colorOf[cellIndex(ix, iy, iz)] = ci;
-          const cube = new THREE.Mesh(cubeGeometry, cellMaterials[ci]);
-          cube.position.copy(cellCenter(ix, iy, iz));
-          skeletonRoot.add(cube);
-        }
-      }
-    }
-
-    // Connect same-coloured neighbours with a bar whose cross section matches the
-    // cube's sides (only its length differs), running from one cube face to the
-    // next. Each cube may join at most two others and loops are avoided, so linked
-    // cubes of a colour form snake-like chains.
+    // Bars that join consecutive cells of an arrow: the cross section matches the
+    // cube's sides, only the length spans the gap between two adjacent cube faces.
     const AXES = [
       [1, 0, 0],
       [0, 1, 0],
@@ -269,64 +252,75 @@
       return new THREE.BoxGeometry(dims[0], dims[1], dims[2]);
     });
 
-    const candidateEdges = [];
-    for (let ix = 0; ix < GRID; ix++) {
-      for (let iy = 0; iy < GRID; iy++) {
-        for (let iz = 0; iz < GRID; iz++) {
-          const a = cellIndex(ix, iy, iz);
-          const ca = colorOf[a];
-          for (let ax = 0; ax < AXES.length; ax++) {
-            const [dx, dy, dz] = AXES[ax];
-            const jx = ix + dx;
-            const jy = iy + dy;
-            const jz = iz + dz;
-            if (jx >= GRID || jy >= GRID || jz >= GRID) continue;
-            if (colorOf[cellIndex(jx, jy, jz)] !== ca) continue;
-            candidateEdges.push({ a, b: cellIndex(jx, jy, jz), ax, ix, iy, iz });
-          }
-        }
-      }
+    // Arrowhead cone (points +Y by default; reoriented per arrow head).
+    const coneHeight = cubeEdge * 1.4;
+    const coneRadius = cubeEdge * 0.62;
+    const coneGeometry = new THREE.ConeGeometry(coneRadius, coneHeight, 16);
+    const CONE_UP = new THREE.Vector3(0, 1, 0);
+
+    // Index (0/1/2) of the axis along which two adjacent cells differ.
+    function axisIndex(a, b) {
+      if (a[0] !== b[0]) return 0;
+      if (a[1] !== b[1]) return 1;
+      return 2;
     }
 
-    // Shuffle so the snakes aren't biased toward a single axis.
-    for (let i = candidateEdges.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [candidateEdges[i], candidateEdges[j]] = [candidateEdges[j], candidateEdges[i]];
-    }
-
-    const degree = new Int8Array(GRID * GRID * GRID);
-    const parent = new Int32Array(GRID * GRID * GRID);
-    for (let i = 0; i < parent.length; i++) parent[i] = i;
-    const find = (a) => {
-      while (parent[a] !== a) {
-        parent[a] = parent[parent[a]];
-        a = parent[a];
-      }
-      return a;
-    };
-
-    const midpoint = new THREE.Vector3();
-    for (const edge of candidateEdges) {
-      if (degree[edge.a] >= 2 || degree[edge.b] >= 2) continue;
-      const ra = find(edge.a);
-      const rb = find(edge.b);
-      if (ra === rb) continue; // skip: would close a loop rather than extend a snake
-      parent[ra] = rb;
-      degree[edge.a]++;
-      degree[edge.b]++;
-
-      const [dx, dy, dz] = AXES[edge.ax];
-      const connector = new THREE.Mesh(
-        connectorGeoms[edge.ax],
-        cellMaterials[colorOf[edge.a]]
+    function addConnector(a, b, material) {
+      const ax = axisIndex(a, b);
+      const connector = new THREE.Mesh(connectorGeoms[ax], material);
+      connector.position.set(
+        cellMin + ((a[0] + b[0]) / 2 + 0.5) * CELL,
+        cellMin + ((a[1] + b[1]) / 2 + 0.5) * CELL,
+        cellMin + ((a[2] + b[2]) / 2 + 0.5) * CELL
       );
-      midpoint.set(
-        cellMin + (edge.ix + 0.5 + dx * 0.5) * CELL,
-        cellMin + (edge.iy + 0.5 + dy * 0.5) * CELL,
-        cellMin + (edge.iz + 0.5 + dz * 0.5) * CELL
-      );
-      connector.position.copy(midpoint);
       skeletonRoot.add(connector);
+    }
+
+    function addArrow(arrow) {
+      const cells = arrow.cells;
+      if (!cells || cells.length === 0) return;
+      const material = cellMaterials[arrow.color % cellMaterials.length];
+
+      for (const [ix, iy, iz] of cells) {
+        const cube = new THREE.Mesh(cubeGeometry, material);
+        cube.position.copy(cellCenter(ix, iy, iz));
+        skeletonRoot.add(cube);
+      }
+
+      for (let i = 0; i < cells.length - 1; i++) {
+        addConnector(cells[i], cells[i + 1], material);
+      }
+
+      // Arrowhead: cells are stored head-first, so it points from the head away
+      // from the body (cells[0] - cells[1]) and sits just beyond the head cube.
+      if (cells.length >= 2) {
+        const [hx, hy, hz] = cells[0];
+        const [nx, ny, nz] = cells[1];
+        const dir = new THREE.Vector3(hx - nx, hy - ny, hz - nz).normalize();
+        const cone = new THREE.Mesh(coneGeometry, material);
+        cone.quaternion.setFromUnitVectors(CONE_UP, dir);
+        cone.position
+          .copy(cellCenter(hx, hy, hz))
+          .addScaledVector(dir, cubeEdge / 2 + coneHeight / 2);
+        skeletonRoot.add(cone);
+      }
+    }
+
+    // Load the arrow set from a static JSON file and render it. Generation lives
+    // in tools/generate-arrows.mjs; this page only draws what the file describes.
+    try {
+      const res = await fetch("./arrows.json", { cache: "no-cache" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (data.grid && data.grid !== GRID) {
+        console.warn(
+          `arrows.json grid (${data.grid}) differs from lattice grid (${GRID}); ` +
+            "positions may not align with the wireframe."
+        );
+      }
+      for (const arrow of data.arrows) addArrow(arrow);
+    } catch (err) {
+      console.error("Failed to load arrows.json:", err);
     }
 
     // Subtle idle hover so the skeleton feels suspended
