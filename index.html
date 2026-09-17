@@ -362,17 +362,21 @@
       return x >= 0 && x < SIZE && y >= 0 && y < SIZE && z >= 0 && z < SIZE;
     }
 
-    function pathClearFrom(x, y, z, dir) {
+    function pathClearOn(map, x, y, z, dir) {
       let cx = x + dir.x;
       let cy = y + dir.y;
       let cz = z + dir.z;
       while (isInside(cx, cy, cz)) {
-        if (grid.has(key(cx, cy, cz))) return false;
+        if (map.has(key(cx, cy, cz))) return false;
         cx += dir.x;
         cy += dir.y;
         cz += dir.z;
       }
       return true;
+    }
+
+    function pathClearFrom(x, y, z, dir) {
+      return pathClearOn(grid, x, y, z, dir);
     }
 
     /**
@@ -407,10 +411,15 @@
         : capacity;
     }
 
-    function tryBuildPuzzle() {
-      clearBoard();
-      const gen = generationId;
-
+    /**
+     * Build a full logical layout without creating meshes (fast enough for
+     * backtracking on 5×5×5). Returns an array of {x,y,z,dir} or null.
+     */
+    function buildLayout(targetCount) {
+      /** @type {Map<string, THREE.Vector3>} */
+      const map = new Map();
+      /** @type {{x:number,y:number,z:number,dir:THREE.Vector3}[]} */
+      const history = [];
       const cells = [];
       for (let x = 0; x < SIZE; x += 1) {
         for (let y = 0; y < SIZE; y += 1) {
@@ -420,44 +429,124 @@
         }
       }
 
-      const targetCount = getTargetCount();
       let attempts = 0;
-      const maxAttempts = 8000 * SIZE;
+      const maxAttempts = 4000 * SIZE;
+      let peak = 0;
+      let sincePeak = 0;
 
-      while (grid.size < targetCount && attempts < maxAttempts) {
+      while (map.size < targetCount && attempts < maxAttempts) {
         attempts += 1;
-        if (gen !== generationId) return false;
 
-        const empty = cells.filter((c) => !grid.has(key(c.x, c.y, c.z)));
+        if (map.size > peak) {
+          peak = map.size;
+          sincePeak = 0;
+        } else {
+          sincePeak += 1;
+          // Stuck oscillating — restart is cheaper than endless undo/redo.
+          if (sincePeak > 800) return null;
+        }
+
+        const empty = cells.filter((c) => !map.has(key(c.x, c.y, c.z)));
         if (!empty.length) break;
 
         const candidates = [];
         for (const cell of empty) {
           for (const baseDir of DIRS) {
-            if (pathClearFrom(cell.x, cell.y, cell.z, baseDir)) {
-              candidates.push({ cell, dir: baseDir.clone() });
+            if (pathClearOn(map, cell.x, cell.y, cell.z, baseDir)) {
+              candidates.push({ cell, dir: baseDir });
             }
           }
         }
-        if (!candidates.length) break;
 
-        const pick = candidates[Math.floor(Math.random() * candidates.length)];
-        placeBlock(pick.cell.x, pick.cell.y, pick.cell.z, pick.dir);
+        if (!candidates.length) {
+          const undo = Math.min(history.length, 1 + Math.floor(Math.random() * 5));
+          if (!undo) return null;
+          for (let i = 0; i < undo; i += 1) {
+            const prev = history.pop();
+            if (!prev) break;
+            map.delete(key(prev.x, prev.y, prev.z));
+          }
+          continue;
+        }
+
+        // Prefer more-constrained empty cells (fewer clear dirs) to reduce dead-ends.
+        const dirCount = new Map();
+        for (const c of candidates) {
+          const k = key(c.cell.x, c.cell.y, c.cell.z);
+          dirCount.set(k, (dirCount.get(k) || 0) + 1);
+        }
+        let bestScore = Infinity;
+        const scored = [];
+        for (const c of candidates) {
+          const score = dirCount.get(key(c.cell.x, c.cell.y, c.cell.z)) || 6;
+          if (score < bestScore) bestScore = score;
+          scored.push({ c, score });
+        }
+        const pool = scored.filter((s) => s.score <= bestScore + 1).map((s) => s.c);
+        const pick = pool[Math.floor(Math.random() * pool.length)];
+        const dir = pick.dir.clone();
+        map.set(key(pick.cell.x, pick.cell.y, pick.cell.z), dir);
+        history.push({ x: pick.cell.x, y: pick.cell.y, z: pick.cell.z, dir });
       }
 
+      if (map.size !== targetCount) return null;
+      return history;
+    }
+
+    function tryBuildPuzzle() {
+      const targetCount = getTargetCount();
+      const layout = buildLayout(targetCount);
+      if (!layout) return false;
+
+      clearBoard();
+      for (const item of layout) {
+        placeBlock(item.x, item.y, item.z, item.dir);
+      }
       return grid.size === targetCount;
     }
 
     function generatePuzzle() {
+      const retries = Math.max(60, SIZE * 40);
       let ok = false;
-      for (let i = 0; i < 40; i += 1) {
+      for (let i = 0; i < retries; i += 1) {
         if (tryBuildPuzzle()) {
           ok = true;
           break;
         }
       }
       if (!ok) {
-        tryBuildPuzzle();
+        // Last resort: accept whatever the best single attempt produced.
+        clearBoard();
+        const targetCount = getTargetCount();
+        const layout = buildLayout(targetCount);
+        if (layout) {
+          for (const item of layout) placeBlock(item.x, item.y, item.z, item.dir);
+        } else {
+          // Extremely rare: place a partial greedy layout without backtracking budget.
+          const map = new Map();
+          const cells = [];
+          for (let x = 0; x < SIZE; x += 1) {
+            for (let y = 0; y < SIZE; y += 1) {
+              for (let z = 0; z < SIZE; z += 1) cells.push({ x, y, z });
+            }
+          }
+          for (let a = 0; a < targetCount * 20; a += 1) {
+            if (map.size >= targetCount) break;
+            const empty = cells.filter((c) => !map.has(key(c.x, c.y, c.z)));
+            const candidates = [];
+            for (const cell of empty) {
+              for (const baseDir of DIRS) {
+                if (pathClearOn(map, cell.x, cell.y, cell.z, baseDir)) {
+                  candidates.push({ cell, dir: baseDir.clone() });
+                }
+              }
+            }
+            if (!candidates.length) break;
+            const pick = candidates[Math.floor(Math.random() * candidates.length)];
+            map.set(key(pick.cell.x, pick.cell.y, pick.cell.z), pick.dir);
+            placeBlock(pick.cell.x, pick.cell.y, pick.cell.z, pick.dir);
+          }
+        }
       }
       updateRemaining();
       hideWin();
