@@ -1,0 +1,91 @@
+name: Deploy Games
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "games/**"
+  workflow_dispatch:
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      games: ${{ steps.detect.outputs.games }}
+      has_games: ${{ steps.detect.outputs.has_games }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect games to deploy
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          is_valid_game() {
+            local dir="$1"
+            [[ -f "$dir/index.html" && -f "$dir/wrangler.jsonc" ]]
+          }
+
+          games=()
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            for dir in games/*/; do
+              [[ -d "$dir" ]] || continue
+              if is_valid_game "$dir"; then
+                games+=("$(basename "$dir")")
+              fi
+            done
+          else
+            before="${{ github.event.before }}"
+            if [[ -z "$before" || "$before" =~ ^0+$ ]]; then
+              # First commit on the branch / no usable before SHA: treat all valid games as changed
+              mapfile -t changed_dirs < <(find games -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -u)
+            else
+              mapfile -t changed_dirs < <(
+                git diff --name-only "$before" "${{ github.sha }}" -- games/ \
+                  | awk -F/ 'NF>=2 { print $2 }' \
+                  | sort -u
+              )
+            fi
+
+            for slug in "${changed_dirs[@]+"${changed_dirs[@]}"}"; do
+              [[ -n "$slug" ]] || continue
+              if is_valid_game "games/$slug"; then
+                games+=("$slug")
+              fi
+            done
+          fi
+
+          if [[ ${#games[@]} -eq 0 ]]; then
+            echo "games=[]" >> "$GITHUB_OUTPUT"
+            echo "has_games=false" >> "$GITHUB_OUTPUT"
+            echo "No games to deploy."
+          else
+            json=$(printf '%s\n' "${games[@]}" | jq -R . | jq -sc .)
+            echo "games=$json" >> "$GITHUB_OUTPUT"
+            echo "has_games=true" >> "$GITHUB_OUTPUT"
+            echo "Games to deploy: $json"
+          fi
+
+  deploy:
+    needs: detect
+    if: needs.detect.outputs.has_games == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        game: ${{ fromJson(needs.detect.outputs.games) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy ${{ matrix.game }}
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: games/${{ matrix.game }}
