@@ -205,6 +205,45 @@
     const lattice = buildLattice(GRID, CELL);
     skeletonRoot.add(lattice);
 
+    // Fill every grid cell with a smaller vibrant cube (75% of the cell volume).
+    // Colors are drawn from a small shared palette so hues repeat across cubes.
+    const PALETTE = [
+      0xff3b3b, // red
+      0xff9f1c, // orange
+      0xffd23f, // yellow
+      0x2ec4b6, // teal
+      0x3a86ff, // blue
+      0x8338ec, // purple
+    ];
+
+    const cellMaterials = PALETTE.map(
+      (color) =>
+        new THREE.MeshStandardMaterial({
+          color,
+          roughness: 0.45,
+          metalness: 0.1,
+        })
+    );
+
+    const cubeEdge = CELL * Math.cbrt(0.75);
+    const cubeGeometry = new THREE.BoxGeometry(cubeEdge, cubeEdge, cubeEdge);
+    const cellMin = -HALF * CELL;
+
+    for (let ix = 0; ix < GRID; ix++) {
+      const x = cellMin + (ix + 0.5) * CELL;
+      for (let iy = 0; iy < GRID; iy++) {
+        const y = cellMin + (iy + 0.5) * CELL;
+        for (let iz = 0; iz < GRID; iz++) {
+          const z = cellMin + (iz + 0.5) * CELL;
+          const material =
+            cellMaterials[Math.floor(Math.random() * cellMaterials.length)];
+          const cube = new THREE.Mesh(cubeGeometry, material);
+          cube.position.set(x, y, z);
+          skeletonRoot.add(cube);
+        }
+      }
+    }
+
     // Subtle idle hover so the skeleton feels suspended
     gsap.to(skeletonRoot.position, {
       y: 0.14,
