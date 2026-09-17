@@ -229,19 +229,104 @@
     const cubeGeometry = new THREE.BoxGeometry(cubeEdge, cubeEdge, cubeEdge);
     const cellMin = -HALF * CELL;
 
+    const cellIndex = (ix, iy, iz) => (ix * GRID + iy) * GRID + iz;
+    const cellCenter = (ix, iy, iz) =>
+      new THREE.Vector3(
+        cellMin + (ix + 0.5) * CELL,
+        cellMin + (iy + 0.5) * CELL,
+        cellMin + (iz + 0.5) * CELL
+      );
+
+    const colorOf = new Int8Array(GRID * GRID * GRID);
+
     for (let ix = 0; ix < GRID; ix++) {
-      const x = cellMin + (ix + 0.5) * CELL;
       for (let iy = 0; iy < GRID; iy++) {
-        const y = cellMin + (iy + 0.5) * CELL;
         for (let iz = 0; iz < GRID; iz++) {
-          const z = cellMin + (iz + 0.5) * CELL;
-          const material =
-            cellMaterials[Math.floor(Math.random() * cellMaterials.length)];
-          const cube = new THREE.Mesh(cubeGeometry, material);
-          cube.position.set(x, y, z);
+          const ci = Math.floor(Math.random() * cellMaterials.length);
+          colorOf[cellIndex(ix, iy, iz)] = ci;
+          const cube = new THREE.Mesh(cubeGeometry, cellMaterials[ci]);
+          cube.position.copy(cellCenter(ix, iy, iz));
           skeletonRoot.add(cube);
         }
       }
+    }
+
+    // Connect same-coloured neighbours with a bar whose cross section matches the
+    // cube's sides (only its length differs), running from one cube face to the
+    // next. Each cube may join at most two others and loops are avoided, so linked
+    // cubes of a colour form snake-like chains.
+    const AXES = [
+      [1, 0, 0],
+      [0, 1, 0],
+      [0, 0, 1],
+    ];
+    const connectorLength = CELL - cubeEdge;
+    const connectorGeoms = AXES.map(([dx, dy, dz]) => {
+      const dims = [cubeEdge, cubeEdge, cubeEdge];
+      if (dx) dims[0] = connectorLength;
+      if (dy) dims[1] = connectorLength;
+      if (dz) dims[2] = connectorLength;
+      return new THREE.BoxGeometry(dims[0], dims[1], dims[2]);
+    });
+
+    const candidateEdges = [];
+    for (let ix = 0; ix < GRID; ix++) {
+      for (let iy = 0; iy < GRID; iy++) {
+        for (let iz = 0; iz < GRID; iz++) {
+          const a = cellIndex(ix, iy, iz);
+          const ca = colorOf[a];
+          for (let ax = 0; ax < AXES.length; ax++) {
+            const [dx, dy, dz] = AXES[ax];
+            const jx = ix + dx;
+            const jy = iy + dy;
+            const jz = iz + dz;
+            if (jx >= GRID || jy >= GRID || jz >= GRID) continue;
+            if (colorOf[cellIndex(jx, jy, jz)] !== ca) continue;
+            candidateEdges.push({ a, b: cellIndex(jx, jy, jz), ax, ix, iy, iz });
+          }
+        }
+      }
+    }
+
+    // Shuffle so the snakes aren't biased toward a single axis.
+    for (let i = candidateEdges.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [candidateEdges[i], candidateEdges[j]] = [candidateEdges[j], candidateEdges[i]];
+    }
+
+    const degree = new Int8Array(GRID * GRID * GRID);
+    const parent = new Int32Array(GRID * GRID * GRID);
+    for (let i = 0; i < parent.length; i++) parent[i] = i;
+    const find = (a) => {
+      while (parent[a] !== a) {
+        parent[a] = parent[parent[a]];
+        a = parent[a];
+      }
+      return a;
+    };
+
+    const midpoint = new THREE.Vector3();
+    for (const edge of candidateEdges) {
+      if (degree[edge.a] >= 2 || degree[edge.b] >= 2) continue;
+      const ra = find(edge.a);
+      const rb = find(edge.b);
+      if (ra === rb) continue; // skip: would close a loop rather than extend a snake
+      parent[ra] = rb;
+      degree[edge.a]++;
+      degree[edge.b]++;
+
+      const [dx, dy, dz] = AXES[edge.ax];
+      const connector = new THREE.Mesh(
+        connectorGeoms[edge.ax],
+        cellMaterials[colorOf[edge.a]]
+      );
+      midpoint.set(
+        cellMin + (edge.ix + 0.5 + dx * 0.5) * CELL,
+        cellMin + (edge.iy + 0.5 + dy * 0.5) * CELL,
+        cellMin + (edge.iz + 0.5 + dz * 0.5) * CELL
+      );
+      connector.position.copy(midpoint);
+      skeletonRoot.add(connector);
     }
 
     // Subtle idle hover so the skeleton feels suspended
