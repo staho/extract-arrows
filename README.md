@@ -49,3 +49,14 @@ Configure these repository secrets for deployment:
 `staho.dev` must be an active zone on the same Cloudflare account. On deploy, Wrangler attaches the custom domain and creates the DNS record.
 
 You can also run the workflow manually via **Actions → Deploy Games → Run workflow** to redeploy every valid game.
+
+## PR previews
+
+Pull requests that change `games/**` (or the PR deploy workflow) deploy preview Workers without touching production:
+
+- Worker name / custom domain: `<slug>-pr-<pr_number>` → `https://<slug>-pr-<pr_number>.staho.dev`
+- Only games changed in the PR (vs the base branch) are deployed; changing the PR workflow redeploys every valid game
+- A sticky PR comment lists the preview URLs
+- When the PR is closed or merged, those preview Workers (and their DNS records) are deleted
+
+Same-repo PRs only (forks cannot use the Cloudflare secrets).
