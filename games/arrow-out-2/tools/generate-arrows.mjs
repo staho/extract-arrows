@@ -7,20 +7,17 @@
 // cells[0] is the head, the rest is the body. The head's facing direction is
 // cells[0] - cells[1].
 //
-// How the full fill works: we build a random Hamiltonian path that wanders
-// through every cell exactly once (randomized Warnsdorff DFS with backtracking),
-// then chop it into consecutive segments of length MIN_LEN..MAX_LEN. That
-// guarantees 100% coverage with no gaps or overlaps while keeping the arrows
-// varied in direction (a serpentine fallback is used only if the randomized
-// search fails to complete within its budget).
+// Extraction model: an arrow slides as a rigid piece in the direction its head
+// points until it leaves the grid. That only works if the corridor ahead of
+// every one of its cells is clear of other arrows, so two arrows aimed at each
+// other deadlock (the "conflicts" from assigning heads after packing).
 //
-// Head orientation ("no head points directly at another arrow"): in a fully
-// packed cube this rule can only hold for arrows whose head sits on the surface
-// and points out of the grid, since every interior neighbour cell is occupied.
-// So it is applied as a best-effort preference: for each arrow we prefer the
-// endpoint whose front cell is out of bounds (points out of the grid); arrows
-// are never dropped (dropping would leave holes). A fuller solvability model for
-// the packed puzzle is future work.
+// Generation is solvable by construction. We peel rectangular slabs off an
+// exposed face of the remaining box, fill each slab with arrows that point
+// toward that face, then recurse on the leftover box (which may peel a
+// different axis next). Optional U-bends merge two adjacent length-3 rods in a
+// slab; they still extract in the peel direction. Playing peel-order from first
+// slab to last therefore solves the packed puzzle with no mutual deadlocks.
 //
 // Usage: node games/arrow-out-2/tools/generate-arrows.mjs [outfile]
 //   default outfile: ../arrows.json (games/arrow-out-2/arrows.json)
@@ -42,170 +39,248 @@ const inBounds = (x, y, z) =>
   x >= 0 && x < GRID && y >= 0 && y < GRID && z >= 0 && z < GRID;
 
 const randInt = (n) => Math.floor(Math.random() * n);
-const randBool = () => Math.random() < 0.5;
 
-const DIRS = [
-  [1, 0, 0],
-  [-1, 0, 0],
-  [0, 1, 0],
-  [0, -1, 0],
-  [0, 0, 1],
-  [0, 0, -1],
-];
-
-function neighborsOf([x, y, z]) {
-  const out = [];
-  for (const [dx, dy, dz] of DIRS) {
-    const nx = x + dx;
-    const ny = y + dy;
-    const nz = z + dz;
-    if (inBounds(nx, ny, nz)) out.push([nx, ny, nz]);
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = randInt(i + 1);
+    [arr[i], arr[j]] = [arr[j], arr[i]];
   }
-  return out;
+  return arr;
 }
 
-// Ordered list of moves from `cell`, unvisited-first via Warnsdorff (fewest
-// onward unvisited neighbours first) with random tie-breaks so each run differs.
-function orderedCandidates(cell, visited) {
-  const scored = [];
-  for (const c of neighborsOf(cell)) {
-    if (visited[idx(c[0], c[1], c[2])]) continue;
-    let degree = 0;
-    for (const n of neighborsOf(c)) {
-      if (!visited[idx(n[0], n[1], n[2])]) degree++;
-    }
-    scored.push({ c, degree, r: Math.random() });
-  }
-  scored.sort((a, b) => a.degree - b.degree || a.r - b.r);
-  return scored.map((s) => s.c);
+function key(c) {
+  return idx(c[0], c[1], c[2]);
 }
 
-// --- 1a. Random Hamiltonian path over every cell (iterative DFS + backtrack). ---
-function randomHamiltonian(maxSteps) {
-  const visited = new Uint8Array(N);
-  const start = [randInt(GRID), randInt(GRID), randInt(GRID)];
-  visited[idx(start[0], start[1], start[2])] = 1;
-  const path = [start];
-  const frames = [{ cands: orderedCandidates(start, visited), i: 0 }];
-
-  let steps = 0;
-  while (path.length < N) {
-    if (++steps > maxSteps) return null;
-    const frame = frames[frames.length - 1];
-    let advanced = false;
-    while (frame.i < frame.cands.length) {
-      const c = frame.cands[frame.i++];
-      if (visited[idx(c[0], c[1], c[2])]) continue;
-      visited[idx(c[0], c[1], c[2])] = 1;
-      path.push(c);
-      frames.push({ cands: orderedCandidates(c, visited), i: 0 });
-      advanced = true;
-      break;
-    }
-    if (!advanced) {
-      const dead = path.pop();
-      visited[idx(dead[0], dead[1], dead[2])] = 0;
-      frames.pop();
-      if (frames.length === 0) return null;
+function isStraight(cells) {
+  if (cells.length < 2) return true;
+  const dx = cells[1][0] - cells[0][0];
+  const dy = cells[1][1] - cells[0][1];
+  const dz = cells[1][2] - cells[0][2];
+  for (let i = 1; i < cells.length; i++) {
+    if (
+      cells[i][0] - cells[i - 1][0] !== dx ||
+      cells[i][1] - cells[i - 1][1] !== dy ||
+      cells[i][2] - cells[i - 1][2] !== dz
+    ) {
+      return false;
     }
   }
-  return path;
+  return true;
 }
 
-// --- 1b. Serpentine fallback (guaranteed) if the random search runs out of budget. ---
-function serpentinePath() {
-  const path = [];
-  for (let a = 0; a < GRID; a++) {
-    const bAsc = a % 2 === 0;
-    for (let bi = 0; bi < GRID; bi++) {
-      const b = bAsc ? bi : GRID - 1 - bi;
-      const cAsc = (a + b) % 2 === 0;
-      for (let ci = 0; ci < GRID; ci++) {
-        const c = cAsc ? ci : GRID - 1 - ci;
-        path.push([a, b, c]);
+// Thicknesses that leave a remainder of 0 or at least MIN_LEN.
+function validLengths(n) {
+  const options = [];
+  for (let t = MIN_LEN; t <= Math.min(MAX_LEN, n); t++) {
+    const rem = n - t;
+    if (rem === 0 || rem >= MIN_LEN) options.push(t);
+  }
+  return options;
+}
+
+function fillSlab(lo, hi, axis, sign, arrows) {
+  const t = hi[axis] - lo[axis];
+  const a = (axis + 1) % 3;
+  const b = (axis + 2) % 3;
+  const rods = [];
+  for (let ua = lo[a]; ua < hi[a]; ua++) {
+    for (let ub = lo[b]; ub < hi[b]; ub++) {
+      const cells = [];
+      for (let k = 0; k < t; k++) {
+        const c = [0, 0, 0];
+        c[a] = ua;
+        c[b] = ub;
+        c[axis] = sign > 0 ? hi[axis] - 1 - k : lo[axis] + k;
+        cells.push(c);
+      }
+      rods.push({ ua, ub, cells });
+    }
+  }
+
+  const used = new Set();
+  shuffle(rods);
+  for (const rod of rods) {
+    const id = `${rod.ua},${rod.ub}`;
+    if (used.has(id)) continue;
+
+    // Thickness 3: optionally join an adjacent rod at the tail into a U-bend
+    // of length 6. Both columns stay exposed in the peel direction.
+    if (t === 3 && Math.random() < 0.5) {
+      const nbs = shuffle([
+        [1, 0],
+        [-1, 0],
+        [0, 1],
+        [0, -1],
+      ]);
+      let merged = false;
+      for (const [da, db] of nbs) {
+        const ua2 = rod.ua + da;
+        const ub2 = rod.ub + db;
+        if (ua2 < lo[a] || ua2 >= hi[a] || ub2 < lo[b] || ub2 >= hi[b]) continue;
+        const id2 = `${ua2},${ub2}`;
+        if (used.has(id2)) continue;
+        const other = rods.find((r) => r.ua === ua2 && r.ub === ub2);
+        if (!other) continue;
+        arrows.push({
+          id: arrows.length,
+          path: rod.cells.concat(other.cells.slice().reverse()),
+        });
+        used.add(id);
+        used.add(id2);
+        merged = true;
+        break;
+      }
+      if (merged) continue;
+    }
+
+    used.add(id);
+    arrows.push({ id: arrows.length, path: rod.cells });
+  }
+}
+
+function fillBox(lo, hi, arrows) {
+  const size = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+  if (size[0] * size[1] * size[2] === 0) return;
+
+  const faces = [];
+  for (let axis = 0; axis < 3; axis++) {
+    if (size[axis] >= MIN_LEN) {
+      faces.push({ axis, sign: 1 });
+      faces.push({ axis, sign: -1 });
+    }
+  }
+  const { axis, sign } = faces[randInt(faces.length)];
+  const t = validLengths(size[axis])[randInt(validLengths(size[axis]).length)];
+
+  const slabLo = lo.slice();
+  const slabHi = hi.slice();
+  const restLo = lo.slice();
+  const restHi = hi.slice();
+  if (sign > 0) {
+    slabLo[axis] = hi[axis] - t;
+    restHi[axis] = hi[axis] - t;
+  } else {
+    slabHi[axis] = lo[axis] + t;
+    restLo[axis] = lo[axis] + t;
+  }
+
+  fillSlab(slabLo, slabHi, axis, sign, arrows);
+  fillBox(restLo, restHi, arrows);
+}
+
+function canExtract(cells, dir, remaining) {
+  const self = new Set(cells.map(key));
+  const [dx, dy, dz] = dir;
+  for (const [x, y, z] of cells) {
+    let k = 1;
+    while (true) {
+      const nx = x + dx * k;
+      const ny = y + dy * k;
+      const nz = z + dz * k;
+      if (!inBounds(nx, ny, nz)) break;
+      const id = idx(nx, ny, nz);
+      if (!self.has(id) && remaining.has(id)) return false;
+      k++;
+    }
+  }
+  return true;
+}
+
+function verifyFixed(outputArrows) {
+  const packed = outputArrows.map((a, id) => ({
+    id,
+    path: a.cells,
+    dir: [
+      a.cells[0][0] - a.cells[1][0],
+      a.cells[0][1] - a.cells[1][1],
+      a.cells[0][2] - a.cells[1][2],
+    ],
+  }));
+  const remaining = new Set();
+  for (const a of packed) for (const c of a.path) remaining.add(key(c));
+
+  const occ = new Int16Array(N).fill(-1);
+  for (const a of packed) for (const c of a.path) occ[key(c)] = a.id;
+
+  const blockersOf = (a) => {
+    const blockers = new Set();
+    const [dx, dy, dz] = a.dir;
+    for (const [x, y, z] of a.path) {
+      let k = 1;
+      while (true) {
+        const nx = x + dx * k;
+        const ny = y + dy * k;
+        const nz = z + dz * k;
+        if (!inBounds(nx, ny, nz)) break;
+        const o = occ[idx(nx, ny, nz)];
+        if (o !== -1 && o !== a.id) blockers.add(o);
+        k++;
       }
     }
-  }
-  return path;
-}
-
-function buildHamiltonian() {
-  for (let attempt = 0; attempt < 60; attempt++) {
-    const p = randomHamiltonian(60 * N);
-    if (p) return p;
-  }
-  console.warn("Random Hamiltonian search exhausted; using serpentine fallback.");
-  return serpentinePath();
-}
-
-// --- 2. Chop the path into arrow-length segments (each in [MIN_LEN, MAX_LEN]). ---
-// The cut always leaves a remainder of 0 or >= MIN_LEN so no segment is too short.
-function segmentLengths(total) {
-  const lens = [];
-  let n = total;
-  while (n > 0) {
-    const options = [];
-    for (let t = MIN_LEN; t <= Math.min(MAX_LEN, n); t++) {
-      const rem = n - t;
-      if (rem === 0 || rem >= MIN_LEN) options.push(t);
-    }
-    const t = options[randInt(options.length)];
-    lens.push(t);
-    n -= t;
-  }
-  return lens;
-}
-
-const path = buildHamiltonian();
-
-// occ[cell] = arrow id occupying it, or -1 when empty.
-const occ = new Int16Array(GRID * GRID * GRID).fill(-1);
-const arrows = []; // each: { id, path: [[x,y,z], ...] }
-let cursor = 0;
-for (const len of segmentLengths(path.length)) {
-  const id = arrows.length;
-  const seg = path.slice(cursor, cursor + len);
-  cursor += len;
-  for (const [x, y, z] of seg) occ[idx(x, y, z)] = id;
-  arrows.push({ id, path: seg });
-}
-
-// --- 3. Head orientation (best-effort, prefer pointing out of the grid). ---
-function frontCell(head, second) {
-  return [
-    head[0] + (head[0] - second[0]),
-    head[1] + (head[1] - second[1]),
-    head[2] + (head[2] - second[2]),
-  ];
-}
-
-// Rank a front cell: 2 = points out of the grid, 1 = empty, 0 = blocked.
-function frontRank(front) {
-  const [x, y, z] = front;
-  if (!inBounds(x, y, z)) return 2;
-  return occ[idx(x, y, z)] === -1 ? 1 : 0;
-}
-
-let exitHeads = 0;
-for (const arrow of arrows) {
-  const p = arrow.path;
-  const startRank = frontRank(frontCell(p[0], p[1]));
-  const endRank = frontRank(frontCell(p[p.length - 1], p[p.length - 2]));
-  let headAtStart;
-  if (startRank !== endRank) headAtStart = startRank > endRank;
-  else headAtStart = randBool();
-  arrow.headAtStart = headAtStart;
-  if (Math.max(startRank, endRank) === 2) exitHeads++;
-}
-
-// --- 4. Serialize (cells head-first). ---
-const outputArrows = arrows.map((arrow) => {
-  const cells = arrow.headAtStart ? arrow.path : arrow.path.slice().reverse();
-  return {
-    color: randInt(PALETTE_SIZE),
-    cells: cells.map(([x, y, z]) => [x, y, z]),
+    return blockers;
   };
-});
+
+  const blockers = packed.map(blockersOf);
+  let mutual = 0;
+  let extractable = 0;
+  let headOnHead = 0;
+  const headDirAt = new Map();
+  for (const a of packed) headDirAt.set(key(a.path[0]), a.dir);
+  for (let i = 0; i < packed.length; i++) {
+    if (blockers[i].size === 0) extractable++;
+    for (const j of blockers[i]) {
+      if (j > i && blockers[j].has(i)) mutual++;
+    }
+    const h = packed[i].path[0];
+    const [dx, dy, dz] = packed[i].dir;
+    const nx = h[0] + dx;
+    const ny = h[1] + dy;
+    const nz = h[2] + dz;
+    if (!inBounds(nx, ny, nz)) continue;
+    const other = headDirAt.get(idx(nx, ny, nz));
+    if (!other) continue;
+    if (other[0] === -dx && other[1] === -dy && other[2] === -dz) headOnHead++;
+  }
+  headOnHead = Math.floor(headOnHead / 2);
+
+  const left = new Set(packed.map((a) => a.id));
+  let pulls = 0;
+  while (left.size) {
+    let moved = false;
+    for (const id of left) {
+      if (canExtract(packed[id].path, packed[id].dir, remaining)) {
+        for (const c of packed[id].path) {
+          remaining.delete(key(c));
+          occ[key(c)] = -1;
+        }
+        left.delete(id);
+        pulls++;
+        moved = true;
+        break;
+      }
+    }
+    if (!moved) {
+      return {
+        ok: false,
+        remaining: left.size,
+        mutual,
+        headOnHead,
+        extractable,
+        pulls,
+      };
+    }
+  }
+  return { ok: true, remaining: 0, mutual, headOnHead, extractable, pulls };
+}
+
+const arrows = [];
+fillBox([0, 0, 0], [GRID, GRID, GRID], arrows);
+
+const outputArrows = arrows.map((arrow) => ({
+  color: randInt(PALETTE_SIZE),
+  cells: arrow.path.map(([x, y, z]) => [x, y, z]),
+}));
 
 const data = { grid: GRID, cell: CELL, arrows: outputArrows };
 
@@ -218,8 +293,20 @@ const outPath = outArg
 writeFileSync(outPath, JSON.stringify(data, null, 2) + "\n");
 
 const totalCells = outputArrows.reduce((n, a) => n + a.cells.length, 0);
+const bent = outputArrows.filter((a) => !isStraight(a.cells)).length;
+const check = verifyFixed(outputArrows);
+if (!check.ok || check.mutual !== 0 || check.headOnHead !== 0) {
+  console.error(
+    `Internal error: written puzzle failed verification ` +
+      `(ok=${check.ok}, remaining=${check.remaining}, mutual=${check.mutual}, ` +
+      `headOnHead=${check.headOnHead}).`
+  );
+  process.exit(1);
+}
+
 console.log(
   `Wrote ${outputArrows.length} arrows (${totalCells} cells, ` +
-    `${((totalCells / (GRID * GRID * GRID)) * 100).toFixed(1)}% fill; ` +
-    `${exitHeads} heads point out of the grid) to ${outPath}`
+    `${((totalCells / N) * 100).toFixed(1)}% fill, ${bent} bent; ` +
+    `solvable in ${check.pulls} pulls, ${check.extractable} free at start, ` +
+    `${check.mutual} mutual deadlocks, ${check.headOnHead} head-on-head) to ${outPath}`
 );
