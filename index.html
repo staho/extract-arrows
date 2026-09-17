@@ -126,6 +126,39 @@
       transform: scale(0.97);
     }
 
+    #size-picker {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px;
+      background: rgba(26, 47, 56, 0.06);
+      border-radius: 999px;
+    }
+
+    #size-picker button {
+      min-width: 36px;
+      padding: 6px 10px;
+      background: transparent;
+      color: var(--muted);
+      font-size: 0.85rem;
+      font-variant-numeric: tabular-nums;
+    }
+
+    #size-picker button:hover {
+      background: rgba(42, 157, 143, 0.15);
+      color: var(--ink);
+    }
+
+    #size-picker button.active {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    #size-picker button.active:hover {
+      background: var(--accent-hover);
+      color: #fff;
+    }
+
     #hint {
       position: absolute;
       bottom: 22px;
@@ -199,6 +232,12 @@
     <span class="brand">Arrow Out</span>
     <span class="divider"></span>
     <span id="remaining">Remaining: <strong>0</strong></span>
+    <span class="divider"></span>
+    <div id="size-picker" role="group" aria-label="Cube size">
+      <button type="button" data-size="3" class="active" aria-pressed="true" title="3×3×3">3³</button>
+      <button type="button" data-size="4" aria-pressed="false" title="4×4×4">4³</button>
+      <button type="button" data-size="5" aria-pressed="false" title="5×5×5">5³</button>
+    </div>
     <button type="button" id="reset-btn">Reset</button>
   </div>
 
@@ -228,7 +267,7 @@
 
     const CELL = 1.15;
     const BLOCK_SIZE = 0.78;
-    const COORDS = [-1, 0, 1];
+    const ALLOWED_SIZES = [3, 4, 5];
     const DIRS = [
       new THREE.Vector3(1, 0, 0),
       new THREE.Vector3(-1, 0, 0),
@@ -252,10 +291,20 @@
     const resetBtn = document.getElementById("reset-btn");
     const playAgainBtn = document.getElementById("play-again-btn");
     const winModal = document.getElementById("win-modal");
+    const sizePicker = document.getElementById("size-picker");
+
+    function parseSizeParam() {
+      const raw = new URLSearchParams(window.location.search).get("size");
+      const n = raw == null || raw === "" ? NaN : Number(raw);
+      if (!Number.isFinite(n)) return 3;
+      const rounded = Math.floor(n);
+      return ALLOWED_SIZES.includes(rounded) ? rounded : 3;
+    }
+
+    let SIZE = parseSizeParam();
 
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
-    camera.position.set(5.2, 4.2, 5.8);
+    const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 200);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -266,10 +315,18 @@
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
-    controls.minDistance = 4;
-    controls.maxDistance = 14;
     controls.target.set(0, 0, 0);
-    controls.update();
+
+    function frameCameraForSize() {
+      const extent = SIZE * CELL;
+      const dist = extent * 1.85;
+      camera.position.set(dist * 0.72, dist * 0.58, dist * 0.8);
+      controls.minDistance = Math.max(3, extent * 0.9);
+      controls.maxDistance = Math.max(14, extent * 4);
+      controls.update();
+    }
+
+    frameCameraForSize();
 
     scene.add(new THREE.AmbientLight(0xffffff, 0.72));
     const keyLight = new THREE.DirectionalLight(0xffffff, 0.85);
@@ -297,24 +354,29 @@
     }
 
     function worldPos(x, y, z) {
-      return new THREE.Vector3(x * CELL, y * CELL, z * CELL);
+      const c = (SIZE - 1) / 2;
+      return new THREE.Vector3((x - c) * CELL, (y - c) * CELL, (z - c) * CELL);
     }
 
     function isInside(x, y, z) {
-      return COORDS.includes(x) && COORDS.includes(y) && COORDS.includes(z);
+      return x >= 0 && x < SIZE && y >= 0 && y < SIZE && z >= 0 && z < SIZE;
     }
 
-    function pathClearFrom(x, y, z, dir) {
+    function pathClearOn(map, x, y, z, dir) {
       let cx = x + dir.x;
       let cy = y + dir.y;
       let cz = z + dir.z;
       while (isInside(cx, cy, cz)) {
-        if (grid.has(key(cx, cy, cz))) return false;
+        if (map.has(key(cx, cy, cz))) return false;
         cx += dir.x;
         cy += dir.y;
         cz += dir.z;
       }
       return true;
+    }
+
+    function pathClearFrom(x, y, z, dir) {
+      return pathClearOn(grid, x, y, z, dir);
     }
 
     /**
@@ -340,65 +402,151 @@
     }
 
     function getTargetCount() {
+      const capacity = SIZE * SIZE * SIZE;
       const params = new URLSearchParams(window.location.search);
       const rawCount = params.get("count");
       const requested = rawCount == null || rawCount === "" ? NaN : Number(rawCount);
       return Number.isFinite(requested) && requested > 0
-        ? Math.min(27, Math.max(1, Math.floor(requested)))
-        : 27;
+        ? Math.min(capacity, Math.max(1, Math.floor(requested)))
+        : capacity;
     }
 
-    function tryBuildPuzzle() {
-      clearBoard();
-      const gen = generationId;
-
+    /**
+     * Build a full logical layout without creating meshes (fast enough for
+     * backtracking on 5×5×5). Returns an array of {x,y,z,dir} or null.
+     */
+    function buildLayout(targetCount) {
+      /** @type {Map<string, THREE.Vector3>} */
+      const map = new Map();
+      /** @type {{x:number,y:number,z:number,dir:THREE.Vector3}[]} */
+      const history = [];
       const cells = [];
-      for (const x of COORDS) {
-        for (const y of COORDS) {
-          for (const z of COORDS) {
+      for (let x = 0; x < SIZE; x += 1) {
+        for (let y = 0; y < SIZE; y += 1) {
+          for (let z = 0; z < SIZE; z += 1) {
             cells.push({ x, y, z });
           }
         }
       }
 
-      const targetCount = getTargetCount();
       let attempts = 0;
-      const maxAttempts = 8000;
+      const maxAttempts = 4000 * SIZE;
+      let peak = 0;
+      let sincePeak = 0;
 
-      while (grid.size < targetCount && attempts < maxAttempts) {
+      while (map.size < targetCount && attempts < maxAttempts) {
         attempts += 1;
-        if (gen !== generationId) return false;
 
-        const empty = cells.filter((c) => !grid.has(key(c.x, c.y, c.z)));
+        if (map.size > peak) {
+          peak = map.size;
+          sincePeak = 0;
+        } else {
+          sincePeak += 1;
+          // Stuck oscillating — restart is cheaper than endless undo/redo.
+          if (sincePeak > 800) return null;
+        }
+
+        const empty = cells.filter((c) => !map.has(key(c.x, c.y, c.z)));
         if (!empty.length) break;
 
         const candidates = [];
         for (const cell of empty) {
           for (const baseDir of DIRS) {
-            if (pathClearFrom(cell.x, cell.y, cell.z, baseDir)) {
-              candidates.push({ cell, dir: baseDir.clone() });
+            if (pathClearOn(map, cell.x, cell.y, cell.z, baseDir)) {
+              candidates.push({ cell, dir: baseDir });
             }
           }
         }
-        if (!candidates.length) break;
 
-        const pick = candidates[Math.floor(Math.random() * candidates.length)];
-        placeBlock(pick.cell.x, pick.cell.y, pick.cell.z, pick.dir);
+        if (!candidates.length) {
+          const undo = Math.min(history.length, 1 + Math.floor(Math.random() * 5));
+          if (!undo) return null;
+          for (let i = 0; i < undo; i += 1) {
+            const prev = history.pop();
+            if (!prev) break;
+            map.delete(key(prev.x, prev.y, prev.z));
+          }
+          continue;
+        }
+
+        // Prefer more-constrained empty cells (fewer clear dirs) to reduce dead-ends.
+        const dirCount = new Map();
+        for (const c of candidates) {
+          const k = key(c.cell.x, c.cell.y, c.cell.z);
+          dirCount.set(k, (dirCount.get(k) || 0) + 1);
+        }
+        let bestScore = Infinity;
+        const scored = [];
+        for (const c of candidates) {
+          const score = dirCount.get(key(c.cell.x, c.cell.y, c.cell.z)) || 6;
+          if (score < bestScore) bestScore = score;
+          scored.push({ c, score });
+        }
+        const pool = scored.filter((s) => s.score <= bestScore + 1).map((s) => s.c);
+        const pick = pool[Math.floor(Math.random() * pool.length)];
+        const dir = pick.dir.clone();
+        map.set(key(pick.cell.x, pick.cell.y, pick.cell.z), dir);
+        history.push({ x: pick.cell.x, y: pick.cell.y, z: pick.cell.z, dir });
       }
 
+      if (map.size !== targetCount) return null;
+      return history;
+    }
+
+    function tryBuildPuzzle() {
+      const targetCount = getTargetCount();
+      const layout = buildLayout(targetCount);
+      if (!layout) return false;
+
+      clearBoard();
+      for (const item of layout) {
+        placeBlock(item.x, item.y, item.z, item.dir);
+      }
       return grid.size === targetCount;
     }
 
     function generatePuzzle() {
+      const retries = Math.max(60, SIZE * 40);
       let ok = false;
-      for (let i = 0; i < 40; i += 1) {
+      for (let i = 0; i < retries; i += 1) {
         if (tryBuildPuzzle()) {
           ok = true;
           break;
         }
       }
       if (!ok) {
-        tryBuildPuzzle();
+        // Last resort: accept whatever the best single attempt produced.
+        clearBoard();
+        const targetCount = getTargetCount();
+        const layout = buildLayout(targetCount);
+        if (layout) {
+          for (const item of layout) placeBlock(item.x, item.y, item.z, item.dir);
+        } else {
+          // Extremely rare: place a partial greedy layout without backtracking budget.
+          const map = new Map();
+          const cells = [];
+          for (let x = 0; x < SIZE; x += 1) {
+            for (let y = 0; y < SIZE; y += 1) {
+              for (let z = 0; z < SIZE; z += 1) cells.push({ x, y, z });
+            }
+          }
+          for (let a = 0; a < targetCount * 20; a += 1) {
+            if (map.size >= targetCount) break;
+            const empty = cells.filter((c) => !map.has(key(c.x, c.y, c.z)));
+            const candidates = [];
+            for (const cell of empty) {
+              for (const baseDir of DIRS) {
+                if (pathClearOn(map, cell.x, cell.y, cell.z, baseDir)) {
+                  candidates.push({ cell, dir: baseDir.clone() });
+                }
+              }
+            }
+            if (!candidates.length) break;
+            const pick = candidates[Math.floor(Math.random() * candidates.length)];
+            map.set(key(pick.cell.x, pick.cell.y, pick.cell.z), pick.dir);
+            placeBlock(pick.cell.x, pick.cell.y, pick.cell.z, pick.dir);
+          }
+        }
       }
       updateRemaining();
       hideWin();
@@ -591,7 +739,9 @@
         child.raycast = () => {};
       });
 
-      const end = mesh.position.clone().add(block.dir.clone().multiplyScalar(10));
+      const end = mesh.position.clone().add(
+        block.dir.clone().multiplyScalar(SIZE * CELL * 2.5)
+      );
 
       gsap.to(mesh.position, {
         x: end.x,
@@ -719,6 +869,10 @@
     window.__arrowOut = {
       reset: () => generatePuzzle(),
       remaining: () => grid.size,
+      get size() {
+        return SIZE;
+      },
+      setSize: (next) => setSize(next),
       autoSolveStep,
       autoSolveAll: async () => {
         while (grid.size > 0) {
@@ -727,6 +881,33 @@
         }
       },
     };
+
+    function syncSizeUrl() {
+      const url = new URL(window.location.href);
+      if (SIZE === 3) url.searchParams.delete("size");
+      else url.searchParams.set("size", String(SIZE));
+      history.replaceState(null, "", url);
+    }
+
+    function syncSizeButtons() {
+      for (const btn of sizePicker.querySelectorAll("button[data-size]")) {
+        const n = Number(btn.dataset.size);
+        const active = n === SIZE;
+        btn.classList.toggle("active", active);
+        btn.setAttribute("aria-pressed", active ? "true" : "false");
+      }
+    }
+
+    function setSize(next) {
+      const n = Math.floor(Number(next));
+      if (!ALLOWED_SIZES.includes(n) || n === SIZE) return false;
+      SIZE = n;
+      syncSizeButtons();
+      syncSizeUrl();
+      frameCameraForSize();
+      generatePuzzle();
+      return true;
+    }
 
     renderer.domElement.addEventListener("pointerdown", onPointerDown);
     renderer.domElement.addEventListener("pointerup", onPointerUp);
@@ -748,11 +929,19 @@
       e.stopPropagation();
       generatePuzzle();
     });
+    sizePicker.addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-size]");
+      if (!btn) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setSize(btn.dataset.size);
+    });
 
     window.addEventListener("keydown", (e) => {
       if (e.key === "r" || e.key === "R") generatePuzzle();
     });
 
+    syncSizeButtons();
     onResize();
     generatePuzzle();
     animate();
