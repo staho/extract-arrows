@@ -362,34 +362,34 @@
         cellMin + (iz + 0.5) * CELL
       );
 
-    // Bars that join consecutive cells of an arrow: the cross section matches the
-    // cube's sides, only the length spans the gap between two adjacent cube faces.
-    const AXES = [
-      [1, 0, 0],
-      [0, 1, 0],
-      [0, 0, 1],
-    ];
-    const connectorLength = CELL - cubeEdge;
-    const connectorGeoms = AXES.map(([dx, dy, dz]) => {
-      const dims = [cubeEdge, cubeEdge, cubeEdge];
-      if (dx) dims[0] = connectorLength;
-      if (dy) dims[1] = connectorLength;
-      if (dz) dims[2] = connectorLength;
-      return new THREE.BoxGeometry(dims[0], dims[1], dims[2]);
-    });
+    // Unit-Z bar: scale.z is the gap between two cube faces; quaternion aims +Z
+    // along the segment so connectors stay attached while a snake corners.
+    const connectorGeometry = new THREE.BoxGeometry(cubeEdge, cubeEdge, 1);
+    const CONN_AXIS = new THREE.Vector3(0, 0, 1);
+    const _connDelta = new THREE.Vector3();
+
+    function placeConnector(mesh, aPos, bPos) {
+      _connDelta.subVectors(bPos, aPos);
+      const dist = _connDelta.length();
+      if (dist < cubeEdge * 0.15) {
+        mesh.visible = false;
+        return;
+      }
+      mesh.visible = true;
+      mesh.position.copy(aPos).add(bPos).multiplyScalar(0.5);
+      mesh.scale.set(1, 1, Math.max(dist - cubeEdge, 1e-4));
+      mesh.quaternion.setFromUnitVectors(
+        CONN_AXIS,
+        _connDelta.multiplyScalar(1 / dist)
+      );
+    }
 
     // Arrowhead cone (points +Y by default; reoriented per arrow head).
     const coneHeight = cubeEdge * 1.4;
     const coneRadius = cubeEdge * 0.62;
     const coneGeometry = new THREE.ConeGeometry(coneRadius, coneHeight, 16);
     const CONE_UP = new THREE.Vector3(0, 1, 0);
-
-    // Index (0/1/2) of the axis along which two adjacent cells differ.
-    function axisIndex(a, b) {
-      if (a[0] !== b[0]) return 0;
-      if (a[1] !== b[1]) return 1;
-      return 2;
-    }
+    const SLITHER_SPEED = 14;
 
     function key(x, y, z) {
       return `${x},${y},${z}`;
@@ -403,6 +403,8 @@
     const occ = new Map();
     /** @type {Map<number, Arrow>} */
     const arrows = new Map();
+    /** @type {Set<Arrow>} extracted arrows still animating out */
+    const departing = new Set();
     let arrowIdSeq = 0;
     let generationId = 0;
     let puzzleData = null;
@@ -413,11 +415,57 @@
      *   cells: number[][],
      *   dir: THREE.Vector3,
      *   mesh: THREE.Group,
+     *   cubes: THREE.Mesh[],
+     *   connectors: THREE.Mesh[],
+     *   cone: THREE.Mesh,
+     *   tweenTarget: { t: number },
      *   busy: boolean,
      *   bodyMat: THREE.MeshStandardMaterial,
      *   baseColor: number,
      * }} Arrow
      */
+
+    /** World position along an arrow's snake path. `s` is in cell units. */
+    function pathPoint(cells, unit, s, target) {
+      const n = cells.length;
+      if (s >= 0) {
+        const [hx, hy, hz] = cells[0];
+        return target.copy(cellCenter(hx, hy, hz)).addScaledVector(unit, s * CELL);
+      }
+      const bodyIndex = Math.min(-s, n - 1);
+      const i0 = Math.min(Math.floor(bodyIndex), n - 2);
+      const frac = bodyIndex - i0;
+      const a = cells[i0];
+      const b = cells[i0 + 1];
+      return target.set(
+        cellMin + (a[0] + 0.5) * CELL + (b[0] - a[0]) * frac * CELL,
+        cellMin + (a[1] + 0.5) * CELL + (b[1] - a[1]) * frac * CELL,
+        cellMin + (a[2] + 0.5) * CELL + (b[2] - a[2]) * frac * CELL
+      );
+    }
+
+    function layoutArrow(arrow, t) {
+      const unit = arrow.dir;
+      const cubes = arrow.cubes;
+      for (let i = 0; i < cubes.length; i++) {
+        pathPoint(arrow.cells, unit, t - i, cubes[i].position);
+      }
+      for (let i = 0; i < arrow.connectors.length; i++) {
+        placeConnector(
+          arrow.connectors[i],
+          cubes[i].position,
+          cubes[i + 1].position
+        );
+      }
+      arrow.cone.position
+        .copy(cubes[0].position)
+        .addScaledVector(unit, cubeEdge / 2 + coneHeight / 2);
+      arrow.cone.quaternion.setFromUnitVectors(CONE_UP, unit);
+    }
+
+    function slitherDuration(cellCount) {
+      return (cellCount + GRID) / SLITHER_SPEED;
+    }
 
     function pathClearFrom(hx, hy, hz, dir) {
       let cx = hx + dir.x;
@@ -430,17 +478,6 @@
         cz += dir.z;
       }
       return true;
-    }
-
-    function addConnector(group, a, b, material) {
-      const ax = axisIndex(a, b);
-      const connector = new THREE.Mesh(connectorGeoms[ax], material);
-      connector.position.set(
-        cellMin + ((a[0] + b[0]) / 2 + 0.5) * CELL,
-        cellMin + ((a[1] + b[1]) / 2 + 0.5) * CELL,
-        cellMin + ((a[2] + b[2]) / 2 + 0.5) * CELL
-      );
-      group.add(connector);
     }
 
     function addArrow(data) {
@@ -458,10 +495,13 @@
       const id = (arrowIdSeq += 1);
       group.userData.arrowId = id;
 
+      /** @type {THREE.Mesh[]} */
+      const cubes = [];
       for (const [ix, iy, iz] of cells) {
         const cube = new THREE.Mesh(cubeGeometry, bodyMat);
         cube.position.copy(cellCenter(ix, iy, iz));
         group.add(cube);
+        cubes.push(cube);
 
         const hit = new THREE.Mesh(hitGeometry, hitMaterial);
         hit.position.copy(cube.position);
@@ -469,21 +509,21 @@
         group.add(hit);
       }
 
+      /** @type {THREE.Mesh[]} */
+      const connectors = [];
       for (let i = 0; i < cells.length - 1; i++) {
-        addConnector(group, cells[i], cells[i + 1], bodyMat);
+        const connector = new THREE.Mesh(connectorGeometry, bodyMat);
+        placeConnector(connector, cubes[i].position, cubes[i + 1].position);
+        group.add(connector);
+        connectors.push(connector);
       }
 
       // Arrowhead: cells are stored head-first, so it points from the head away
       // from the body (cells[0] - cells[1]) and sits just beyond the head cube.
       const [hx, hy, hz] = cells[0];
       const [nx, ny, nz] = cells[1];
-      const dir = new THREE.Vector3(hx - nx, hy - ny, hz - nz);
-      const unit = dir.clone().normalize();
+      const dir = new THREE.Vector3(hx - nx, hy - ny, hz - nz).normalize();
       const cone = new THREE.Mesh(coneGeometry, bodyMat);
-      cone.quaternion.setFromUnitVectors(CONE_UP, unit);
-      cone.position
-        .copy(cellCenter(hx, hy, hz))
-        .addScaledVector(unit, cubeEdge / 2 + coneHeight / 2);
       group.add(cone);
 
       boardRoot.add(group);
@@ -494,10 +534,15 @@
         cells,
         dir,
         mesh: group,
+        cubes,
+        connectors,
+        cone,
+        tweenTarget: { t: 0 },
         busy: false,
         bodyMat,
         baseColor: colorHex,
       };
+      layoutArrow(arrow, 0);
       arrows.set(id, arrow);
       for (const [x, y, z] of cells) {
         occ.set(key(x, y, z), arrow);
@@ -505,19 +550,21 @@
     }
 
     function disposeArrowMaterials(arrow) {
+      gsap.killTweensOf(arrow.tweenTarget);
       gsap.killTweensOf(arrow.mesh.position);
-      gsap.killTweensOf(arrow.mesh.scale);
       gsap.killTweensOf(arrow.bodyMat.color);
       arrow.bodyMat.dispose();
     }
 
     function clearBoard() {
       generationId += 1;
-      for (const arrow of arrows.values()) {
+      const live = [...arrows.values(), ...departing];
+      for (const arrow of live) {
         if (arrow.mesh.parent) boardRoot.remove(arrow.mesh);
         disposeArrowMaterials(arrow);
       }
       arrows.clear();
+      departing.clear();
       occ.clear();
     }
 
@@ -572,6 +619,7 @@
         if (occ.get(k) === arrow) occ.delete(k);
       }
       arrows.delete(arrow.id);
+      departing.add(arrow);
       updateRemaining();
       const clearedBoard = arrows.size === 0;
 
@@ -579,30 +627,20 @@
         child.raycast = () => {};
       });
 
-      const end = mesh.position
-        .clone()
-        .add(arrow.dir.clone().normalize().multiplyScalar(GRID * CELL));
-
-      gsap.to(mesh.position, {
-        x: end.x,
-        y: end.y,
-        z: end.z,
-        duration: 0.55,
-        ease: "power2.in",
+      const tMax = arrow.cells.length + GRID;
+      arrow.tweenTarget.t = 0;
+      gsap.to(arrow.tweenTarget, {
+        t: tMax,
+        duration: slitherDuration(arrow.cells.length),
+        ease: "power1.in",
+        onUpdate: () => layoutArrow(arrow, arrow.tweenTarget.t),
         onComplete: () => {
+          departing.delete(arrow);
           if (gen !== generationId || mesh.userData.arrowId !== arrowId) return;
           if (mesh.parent) boardRoot.remove(mesh);
           disposeArrowMaterials(arrow);
           if (clearedBoard && gen === generationId) showWin();
         },
-      });
-
-      gsap.to(mesh.scale, {
-        x: 0.7,
-        y: 0.7,
-        z: 0.7,
-        duration: 0.55,
-        ease: "power1.in",
       });
     }
 
@@ -741,10 +779,17 @@
       autoSolveAll: async () => {
         while (arrows.size > 0) {
           if (!autoSolveStep()) break;
-          await new Promise((r) => setTimeout(r, 600));
+          await new Promise((r) => setTimeout(r, 1100));
         }
       },
       setGridVisible,
+      slitherDebug: () =>
+        [...departing].map((a) => ({
+          id: a.id,
+          t: a.tweenTarget.t,
+          n: a.cells.length,
+          cubes: a.cubes.map((c) => [c.position.x, c.position.y, c.position.z]),
+        })),
     };
 
     renderer.domElement.addEventListener("pointerdown", onPointerDown);
