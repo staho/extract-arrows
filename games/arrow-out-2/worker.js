@@ -1,5 +1,9 @@
 const MAX_BODY_BYTES = 200_000;
 const JSON_HEADERS = { "Content-Type": "application/json; charset=utf-8" };
+const NAME_RE = /^[A-Za-z0-9 _-]{1,16}$/;
+const MIN_TIME_MS = 3_000;
+const MAX_TIME_MS = 86_400_000;
+const SCORE_LIMIT = 10;
 
 export default {
   async fetch(request, env) {
@@ -13,6 +17,14 @@ export default {
 
       if (path === "/api/archive" && request.method === "GET") {
         return await listArchive(env);
+      }
+
+      if (path === "/api/scores" && request.method === "GET") {
+        return await listScores(request, env);
+      }
+
+      if (path === "/api/scores" && request.method === "POST") {
+        return await submitScore(request, env);
       }
 
       if (path === "/api/admin/levels" && request.method === "GET") {
@@ -126,6 +138,147 @@ function parsePositiveInt(raw) {
     return jsonError(400, "id must be a positive integer");
   }
   return id;
+}
+
+const BEST_SCORES_SQL = `
+  WITH best AS (
+    SELECT
+      name,
+      time_ms,
+      lives_left,
+      created_at,
+      ROW_NUMBER() OVER (
+        PARTITION BY LOWER(name)
+        ORDER BY time_ms ASC, lives_left DESC, created_at ASC
+      ) AS rn
+    FROM scores
+    WHERE level_id = ?
+  )
+  SELECT name, time_ms, lives_left, created_at
+  FROM best
+  WHERE rn = 1
+  ORDER BY time_ms ASC, lives_left DESC, created_at ASC
+`;
+
+async function resolveLevelId(rawId, env) {
+  if (rawId instanceof Response) return rawId;
+  if (rawId != null) {
+    const row = await env.DB.prepare("SELECT id FROM levels WHERE id = ?")
+      .bind(rawId)
+      .first();
+    if (!row) return jsonError(404, "level not found");
+    return rawId;
+  }
+
+  const row = await env.DB.prepare(
+    "SELECT level_id AS id FROM current_level WHERE id = 1"
+  ).first();
+  if (!row?.id) return jsonError(404, "level not found");
+  return row.id;
+}
+
+function mapScoreEntries(rows) {
+  return (rows ?? []).map((row, i) => ({
+    rank: i + 1,
+    name: row.name,
+    time_ms: row.time_ms,
+    lives_left: row.lives_left,
+    created_at: row.created_at,
+  }));
+}
+
+async function listScores(request, env) {
+  const id = await resolveLevelId(
+    parsePositiveInt(new URL(request.url).searchParams.get("id")),
+    env
+  );
+  if (id instanceof Response) return id;
+
+  try {
+    const result = await env.DB.prepare(`${BEST_SCORES_SQL} LIMIT ?`)
+      .bind(id, SCORE_LIMIT)
+      .all();
+
+    return Response.json(
+      { level_id: id, entries: mapScoreEntries(result.results) },
+      { headers: { ...JSON_HEADERS, "Cache-Control": "no-store" } }
+    );
+  } catch (err) {
+    console.error("d1 scores list failed", err);
+    return jsonError(500, "internal error");
+  }
+}
+
+async function rankForName(env, levelId, name) {
+  const result = await env.DB.prepare(BEST_SCORES_SQL).bind(levelId).all();
+  const key = name.toLowerCase();
+  const entries = mapScoreEntries(result.results);
+  const found = entries.find((row) => row.name.toLowerCase() === key);
+  return found?.rank ?? null;
+}
+
+function parseScoreName(raw) {
+  if (typeof raw !== "string") return jsonError(400, "name is required");
+  const name = raw.trim();
+  if (!NAME_RE.test(name)) {
+    return jsonError(400, "name must be 1-16 letters, numbers, spaces, _ or -");
+  }
+  return name;
+}
+
+function parseTimeMs(raw) {
+  const timeMs = Number(raw);
+  if (!Number.isInteger(timeMs) || timeMs < MIN_TIME_MS || timeMs > MAX_TIME_MS) {
+    return jsonError(400, "time_ms must be an integer between 3000 and 86400000");
+  }
+  return timeMs;
+}
+
+function parseLivesLeft(raw) {
+  const livesLeft = Number(raw);
+  if (!Number.isInteger(livesLeft) || livesLeft < 0 || livesLeft > 3) {
+    return jsonError(400, "lives_left must be an integer between 0 and 3");
+  }
+  return livesLeft;
+}
+
+async function submitScore(request, env) {
+  const parsed = await readJsonObject(request);
+  if (parsed instanceof Response) return parsed;
+
+  const id = await resolveLevelId(parsePositiveInt(parsed.id), env);
+  if (id instanceof Response) return id;
+
+  const name = parseScoreName(parsed.name);
+  if (name instanceof Response) return name;
+
+  const timeMs = parseTimeMs(parsed.time_ms);
+  if (timeMs instanceof Response) return timeMs;
+
+  const livesLeft = parseLivesLeft(parsed.lives_left);
+  if (livesLeft instanceof Response) return livesLeft;
+
+  try {
+    const inserted = await env.DB.prepare(
+      `INSERT INTO scores (level_id, name, time_ms, lives_left)
+       VALUES (?, ?, ?, ?)
+       RETURNING id`
+    )
+      .bind(id, name, timeMs, livesLeft)
+      .first();
+
+    const scoreId = inserted?.id;
+    if (scoreId == null) return jsonError(500, "failed to insert score");
+
+    const rank = await rankForName(env, id, name);
+    return Response.json(
+      { id: scoreId, rank, level_id: id },
+      { status: 201, headers: JSON_HEADERS }
+    );
+  } catch (err) {
+    console.error("d1 score insert failed", err);
+    return jsonError(500, "internal error");
+  }
 }
 
 async function listLevels(env) {

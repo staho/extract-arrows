@@ -107,6 +107,32 @@
       font-weight: 700;
     }
 
+    #lives {
+      display: flex;
+      align-items: center;
+      gap: 1px;
+      font-size: 1.05rem;
+      line-height: 1;
+    }
+
+    #lives .heart {
+      width: 1.15em;
+      text-align: center;
+    }
+
+    #lives .heart.spent {
+      opacity: 0.4;
+      filter: grayscale(0.35);
+    }
+
+    #timer {
+      min-width: 3.2rem;
+      font-variant-numeric: tabular-nums;
+      font-weight: 700;
+      font-size: 0.95rem;
+      text-align: center;
+    }
+
     #day-nav {
       display: flex;
       align-items: center;
@@ -143,7 +169,8 @@
 
     #day-nav button:focus-visible,
     #reset-btn:focus-visible,
-    #play-again-btn:focus-visible {
+    #play-again-btn:focus-visible,
+    #score-submit:focus-visible {
       outline: 2px solid var(--accent);
       outline-offset: 2px;
     }
@@ -151,7 +178,7 @@
     @media (max-width: 640px) {
       #hud {
         flex-wrap: nowrap;
-        gap: 10px;
+        gap: 8px;
         padding: 10px 12px;
       }
 
@@ -176,6 +203,15 @@
       #reset-btn {
         min-width: 0;
         padding: 8px 14px;
+      }
+
+      #lives {
+        font-size: 0.95rem;
+      }
+
+      #timer {
+        min-width: 2.6rem;
+        font-size: 0.9rem;
       }
     }
 
@@ -217,7 +253,7 @@
       opacity: 0.9;
     }
 
-    #win-modal {
+    #result-modal {
       position: absolute;
       inset: 0;
       z-index: 20;
@@ -230,15 +266,17 @@
       transition: opacity 0.3s ease;
     }
 
-    #win-modal.visible {
+    #result-modal.visible {
       opacity: 1;
       pointer-events: auto;
     }
 
-    #win-modal .card {
-      width: min(360px, calc(100% - 40px));
+    #result-modal .card {
+      width: min(400px, calc(100% - 40px));
+      max-height: calc(100% - 40px);
+      overflow: auto;
       text-align: center;
-      padding: 32px 28px;
+      padding: 28px 24px 24px;
       background: #fff;
       border-radius: var(--radius);
       box-shadow: var(--shadow);
@@ -246,23 +284,138 @@
       transition: transform 0.3s ease;
     }
 
-    #win-modal.visible .card {
+    #result-modal.visible .card {
       transform: translateY(0) scale(1);
     }
 
-    #win-modal h2 {
-      font-size: 1.6rem;
-      margin-bottom: 8px;
+    #result-modal h2 {
+      font-size: 1.5rem;
+      margin-bottom: 6px;
     }
 
-    #win-modal p {
+    #result-summary {
       color: var(--muted);
-      margin-bottom: 22px;
+      margin-bottom: 14px;
       line-height: 1.45;
     }
 
-    #win-modal button {
+    #result-stats {
+      display: flex;
+      justify-content: center;
+      gap: 18px;
+      margin-bottom: 16px;
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+
+    #result-stats strong {
+      color: var(--ink);
+      font-weight: 700;
+    }
+
+    #score-form {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    #score-form[hidden] {
+      display: none;
+    }
+
+    #score-name {
+      flex: 1;
+      min-width: 0;
+      font-family: inherit;
+      font-size: 0.9rem;
+      padding: 8px 12px;
+      border: 1px solid rgba(26, 47, 56, 0.18);
+      border-radius: 999px;
+      color: var(--ink);
+      background: #fff;
+    }
+
+    #score-name:focus {
+      outline: 2px solid var(--accent);
+      outline-offset: 1px;
+    }
+
+    #score-submit {
+      padding: 8px 16px;
+    }
+
+    #score-submit:disabled {
+      opacity: 0.5;
+      cursor: default;
+      transform: none;
+    }
+
+    #result-rank {
+      color: var(--ink);
+      font-size: 0.9rem;
+      font-weight: 600;
+      margin-bottom: 10px;
+    }
+
+    #result-rank[hidden] {
+      display: none;
+    }
+
+    #result-rank.error {
+      color: #c45c3e;
+      font-weight: 500;
+    }
+
+    #leaderboard {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      font-size: 0.85rem;
+      margin: 4px 0 18px;
+    }
+
+    #leaderboard th {
+      color: var(--muted);
+      font-weight: 600;
+      padding: 6px 8px;
+      border-bottom: 1px solid rgba(26, 47, 56, 0.12);
+    }
+
+    #leaderboard td {
+      padding: 7px 8px;
+      border-bottom: 1px solid rgba(26, 47, 56, 0.08);
+    }
+
+    #leaderboard th:first-child,
+    #leaderboard td:first-child,
+    #leaderboard th:last-child,
+    #leaderboard td:last-child,
+    #leaderboard th:nth-child(3),
+    #leaderboard td:nth-child(3) {
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+    }
+
+    #leaderboard .empty {
+      text-align: center;
+      color: var(--muted);
+      padding: 14px 8px;
+    }
+
+    #result-modal #play-again-btn {
       padding: 10px 22px;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
     }
   </style>
 </head>
@@ -278,16 +431,51 @@
       <button type="button" id="day-next" aria-label="Next puzzle">›</button>
     </nav>
     <span class="divider" id="day-divider" hidden></span>
+    <span id="lives" aria-label="3 lives remaining">
+      <span class="heart" aria-hidden="true">❤️</span>
+      <span class="heart" aria-hidden="true">❤️</span>
+      <span class="heart" aria-hidden="true">❤️</span>
+    </span>
+    <span id="timer">0:00</span>
     <span id="remaining">Remaining: <strong>0</strong></span>
     <button type="button" id="reset-btn">Reset</button>
   </div>
 
   <div id="hint">Drag to orbit · Click an arrow to remove it</div>
 
-  <div id="win-modal" role="dialog" aria-modal="true" aria-labelledby="win-title">
+  <div id="result-modal" role="dialog" aria-modal="true" aria-labelledby="result-title">
     <div class="card">
-      <h2 id="win-title">Board cleared!</h2>
-      <p>Every arrow found its way out. Ready for another go?</p>
+      <h2 id="result-title">Board cleared!</h2>
+      <p id="result-summary">Every arrow found its way out.</p>
+      <div id="result-stats">
+        <span>Time <strong id="result-time">0:00</strong></span>
+        <span>Lives <strong id="result-lives">❤️❤️❤️</strong></span>
+      </div>
+      <form id="score-form" hidden>
+        <label class="sr-only" for="score-name">Nickname</label>
+        <input
+          id="score-name"
+          name="name"
+          type="text"
+          maxlength="16"
+          autocomplete="nickname"
+          placeholder="Your name"
+          spellcheck="false"
+        />
+        <button type="submit" id="score-submit">Submit</button>
+      </form>
+      <p id="result-rank" hidden></p>
+      <table id="leaderboard">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Name</th>
+            <th>Time</th>
+            <th>♥</th>
+          </tr>
+        </thead>
+        <tbody id="leaderboard-body"></tbody>
+      </table>
       <button type="button" id="play-again-btn">Play Again</button>
     </div>
   </div>
@@ -309,6 +497,8 @@
     const GRID = 10;
     const CELL = 1.15;
     const HALF = GRID / 2;
+    const MAX_LIVES = 3;
+    const NAME_KEY = "arrow-out-2-name";
 
     const params = new URLSearchParams(window.location.search);
     const rawDev = params.get("dev");
@@ -318,7 +508,18 @@
     const remainingEl = document.querySelector("#remaining strong");
     const resetBtn = document.getElementById("reset-btn");
     const playAgainBtn = document.getElementById("play-again-btn");
-    const winModal = document.getElementById("win-modal");
+    const resultModal = document.getElementById("result-modal");
+    const resultTitle = document.getElementById("result-title");
+    const resultSummary = document.getElementById("result-summary");
+    const resultTime = document.getElementById("result-time");
+    const resultLives = document.getElementById("result-lives");
+    const scoreForm = document.getElementById("score-form");
+    const scoreName = document.getElementById("score-name");
+    const scoreSubmit = document.getElementById("score-submit");
+    const resultRank = document.getElementById("result-rank");
+    const leaderboardBody = document.getElementById("leaderboard-body");
+    const livesEl = document.getElementById("lives");
+    const timerEl = document.getElementById("timer");
     const dayNav = document.getElementById("day-nav");
     const dayDivider = document.getElementById("day-divider");
     const dayPrevBtn = document.getElementById("day-prev");
@@ -498,6 +699,11 @@
     let arrowIdSeq = 0;
     let generationId = 0;
     let puzzleData = null;
+    let lives = MAX_LIVES;
+    let timeMs = 0;
+    let timerStartedAt = null;
+    let runOver = false;
+    let submittedScore = false;
 
     /**
      * @typedef {{
@@ -655,7 +861,7 @@
 
     function buildBoard(data) {
       clearBoard();
-      hideWin();
+      resetAttempt();
       if (data.grid && data.grid !== GRID) {
         console.warn(
           `arrows.json grid (${data.grid}) differs from lattice grid (${GRID}); ` +
@@ -675,15 +881,148 @@
       remainingEl.textContent = String(arrows.size);
     }
 
-    function showWin() {
-      winModal.classList.add("visible");
+    function formatTime(ms) {
+      const totalSec = Math.max(0, Math.floor(ms / 1000));
+      const minutes = Math.floor(totalSec / 60);
+      const seconds = totalSec % 60;
+      return `${minutes}:${String(seconds).padStart(2, "0")}`;
     }
 
-    function hideWin() {
-      winModal.classList.remove("visible");
+    function heartString(count) {
+      const filled = Math.max(0, Math.min(MAX_LIVES, count));
+      return "❤️".repeat(filled) + "🤍".repeat(MAX_LIVES - filled);
+    }
+
+    function updateLives() {
+      const nodes = livesEl.querySelectorAll(".heart");
+      nodes.forEach((el, i) => {
+        const filled = i < lives;
+        el.textContent = filled ? "❤️" : "🤍";
+        el.classList.toggle("spent", !filled);
+      });
+      livesEl.setAttribute(
+        "aria-label",
+        `${lives} ${lives === 1 ? "life" : "lives"} remaining`
+      );
+    }
+
+    function updateTimer() {
+      timerEl.textContent = formatTime(timeMs);
+    }
+
+    function startTimer() {
+      if (runOver || timerStartedAt != null) return;
+      timerStartedAt = performance.now();
+    }
+
+    function freezeTimer() {
+      if (timerStartedAt != null) {
+        timeMs = Math.max(0, Math.round(performance.now() - timerStartedAt));
+      }
+      timerStartedAt = null;
+      runOver = true;
+      updateTimer();
+    }
+
+    function resetAttempt() {
+      lives = MAX_LIVES;
+      timeMs = 0;
+      timerStartedAt = null;
+      runOver = false;
+      submittedScore = false;
+      hideResult();
+      updateLives();
+      updateTimer();
+    }
+
+    function hideResult() {
+      resultModal.classList.remove("visible");
+    }
+
+    function setResultRank(text, isError) {
+      if (!text) {
+        resultRank.hidden = true;
+        resultRank.textContent = "";
+        resultRank.classList.remove("error");
+        return;
+      }
+      resultRank.hidden = false;
+      resultRank.textContent = text;
+      resultRank.classList.toggle("error", Boolean(isError));
+    }
+
+    function renderLeaderboard(entries) {
+      leaderboardBody.replaceChildren();
+      if (!entries.length) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 4;
+        cell.className = "empty";
+        cell.textContent = "No times yet";
+        row.appendChild(cell);
+        leaderboardBody.appendChild(row);
+        return;
+      }
+      for (const entry of entries) {
+        const row = document.createElement("tr");
+        const values = [
+          String(entry.rank),
+          entry.name,
+          formatTime(entry.time_ms),
+          heartString(entry.lives_left),
+        ];
+        for (const value of values) {
+          const cell = document.createElement("td");
+          cell.textContent = value;
+          row.appendChild(cell);
+        }
+        leaderboardBody.appendChild(row);
+      }
+    }
+
+    function scoresPath() {
+      return currentLevel?.id
+        ? `./api/scores?id=${currentLevel.id}`
+        : "./api/scores";
+    }
+
+    async function loadLeaderboard() {
+      renderLeaderboard([]);
+      try {
+        const data = await fetchJson(scoresPath());
+        renderLeaderboard(Array.isArray(data.entries) ? data.entries : []);
+      } catch (err) {
+        console.error("Failed to load scores:", err);
+        renderLeaderboard([]);
+      }
+    }
+
+    function showResult(kind) {
+      const won = kind === "win";
+      resultTitle.textContent = won ? "Board cleared!" : "Out of lives";
+      resultSummary.textContent = won
+        ? "Every arrow found its way out."
+        : "Three blocked moves — retry for another attempt.";
+      resultTime.textContent = formatTime(timeMs);
+      resultLives.textContent = heartString(lives);
+      playAgainBtn.textContent = won ? "Play Again" : "Retry";
+      scoreForm.hidden = !(won && currentLevel?.id && !submittedScore);
+      scoreSubmit.disabled = false;
+      if (!scoreForm.hidden) {
+        try {
+          scoreName.value = localStorage.getItem(NAME_KEY) || "";
+        } catch {
+          scoreName.value = "";
+        }
+      }
+      setResultRank("");
+      resultModal.classList.add("visible");
+      loadLeaderboard();
     }
 
     function tryRemove(arrow) {
+      if (runOver) return;
+      startTimer();
       const [hx, hy, hz] = arrow.cells[0];
       if (pathClearFrom(hx, hy, hz, arrow.dir)) {
         escapeArrow(arrow);
@@ -707,6 +1046,7 @@
       departing.add(arrow);
       updateRemaining();
       const clearedBoard = arrows.size === 0;
+      if (clearedBoard) freezeTimer();
 
       mesh.traverse((child) => {
         child.raycast = () => {};
@@ -724,12 +1064,13 @@
           if (gen !== generationId || mesh.userData.arrowId !== arrowId) return;
           if (mesh.parent) boardRoot.remove(mesh);
           disposeArrowMaterials(arrow);
-          if (clearedBoard && gen === generationId) showWin();
+          if (clearedBoard && gen === generationId) showResult("win");
         },
       });
     }
 
     function errorArrow(arrow) {
+      if (runOver) return;
       arrow.busy = true;
       const mesh = arrow.mesh;
       const origin = mesh.position.clone();
@@ -739,6 +1080,17 @@
       const gen = generationId;
       const arrowId = arrow.id;
 
+      lives = Math.max(0, lives - 1);
+      updateLives();
+      if (lives === 0) {
+        freezeTimer();
+        window.setTimeout(() => {
+          if (gen === generationId && lives === 0 && !resultModal.classList.contains("visible")) {
+            showResult("lose");
+          }
+        }, 700);
+      }
+
       bodyMat.color.setHex(0xe76f51);
 
       const tl = gsap.timeline({
@@ -747,6 +1099,7 @@
           mesh.position.copy(origin);
           bodyMat.color.setHex(original);
           arrow.busy = false;
+          if (lives === 0 && gen === generationId) showResult("lose");
         },
       });
 
@@ -832,7 +1185,7 @@
       pointerDown = null;
 
       if (Math.hypot(dx, dy) >= 5) return;
-      if (winModal.classList.contains("visible")) return;
+      if (runOver || resultModal.classList.contains("visible")) return;
 
       setPointerFromEvent(event);
       raycaster.setFromCamera(pointer, camera);
@@ -897,8 +1250,57 @@
       e.stopPropagation();
       resetBoard();
     });
+    scoreForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (submittedScore || !currentLevel?.id) return;
+      const name = scoreName.value.trim();
+      if (!/^[A-Za-z0-9 _-]{1,16}$/.test(name)) {
+        setResultRank("Use 1–16 letters, numbers, spaces, _ or -.", true);
+        return;
+      }
+      scoreSubmit.disabled = true;
+      try {
+        const res = await fetch("./api/scores", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            id: currentLevel.id,
+            name,
+            time_ms: timeMs,
+            lives_left: lives,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setResultRank(data.error || `Submit failed (${res.status})`, true);
+          scoreSubmit.disabled = false;
+          return;
+        }
+        submittedScore = true;
+        scoreForm.hidden = true;
+        try {
+          localStorage.setItem(NAME_KEY, name);
+        } catch {
+          /* ignore quota / private mode */
+        }
+        if (data.rank != null) {
+          setResultRank(`Your rank: ${data.rank}`);
+        } else {
+          setResultRank("");
+        }
+        await loadLeaderboard();
+      } catch (err) {
+        console.error("Failed to submit score:", err);
+        setResultRank("Could not submit score.", true);
+        scoreSubmit.disabled = false;
+      }
+    });
     window.addEventListener("keydown", (e) => {
-      if (e.key === "r" || e.key === "R") resetBoard();
+      if (e.key === "r" || e.key === "R") {
+        const tag = e.target && e.target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA") return;
+        resetBoard();
+      }
       if (e.key === "ArrowLeft") {
         const idx = currentIndex();
         if (idx > 0) showLevel(archive[idx - 1]);
@@ -1052,6 +1454,10 @@
     resize();
 
     function tick() {
+      if (timerStartedAt != null && !runOver) {
+        timeMs = Math.max(0, Math.round(performance.now() - timerStartedAt));
+        updateTimer();
+      }
       controls.update();
       renderer.render(scene, camera);
       requestAnimationFrame(tick);
