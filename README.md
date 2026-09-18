@@ -77,6 +77,8 @@ npx wrangler d1 migrations apply arrow-out-2 --remote
 npx wrangler secret put ADMIN_TOKEN
 ```
 
+If `database_id` is still the local placeholder, deploy CI looks up (or creates) the `arrow-out-2` D1 database and patches the Worker config for that deploy only.
+
 Publish a new live puzzle (generation stays on your machine):
 
 ```bash
