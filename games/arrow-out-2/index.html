@@ -470,10 +470,14 @@
       );
     }
 
-    // Arrowhead cone (points +Y by default; reoriented per arrow head).
-    const coneHeight = cubeEdge * 1.4;
-    const coneRadius = cubeEdge * 0.62;
-    const coneGeometry = new THREE.ConeGeometry(coneRadius, coneHeight, 16);
+    // Square pyramid head: same cubeEdge box as a body cube. Radius is
+    // center-to-vertex so a 45° yaw makes the square sides match the cube.
+    const coneGeometry = new THREE.ConeGeometry(
+      cubeEdge / Math.SQRT2,
+      cubeEdge,
+      4
+    );
+    coneGeometry.rotateY(Math.PI / 4);
     const CONE_UP = new THREE.Vector3(0, 1, 0);
     const SLITHER_SPEED = 14;
 
@@ -503,7 +507,6 @@
      *   mesh: THREE.Group,
      *   cubes: THREE.Mesh[],
      *   connectors: THREE.Mesh[],
-     *   cone: THREE.Mesh,
      *   tweenTarget: { t: number },
      *   busy: boolean,
      *   bodyMat: THREE.MeshStandardMaterial,
@@ -536,6 +539,7 @@
       for (let i = 0; i < cubes.length; i++) {
         pathPoint(arrow.cells, unit, t - i, cubes[i].position);
       }
+      cubes[0].quaternion.setFromUnitVectors(CONE_UP, unit);
       for (let i = 0; i < arrow.connectors.length; i++) {
         placeConnector(
           arrow.connectors[i],
@@ -543,10 +547,6 @@
           cubes[i + 1].position
         );
       }
-      arrow.cone.position
-        .copy(cubes[0].position)
-        .addScaledVector(unit, cubeEdge / 2 + coneHeight / 2);
-      arrow.cone.quaternion.setFromUnitVectors(CONE_UP, unit);
     }
 
     function slitherDuration(cellCount) {
@@ -583,8 +583,10 @@
 
       /** @type {THREE.Mesh[]} */
       const cubes = [];
-      for (const [ix, iy, iz] of cells) {
-        const cube = new THREE.Mesh(cubeGeometry, bodyMat);
+      for (let i = 0; i < cells.length; i++) {
+        const [ix, iy, iz] = cells[i];
+        const geometry = i === 0 ? coneGeometry : cubeGeometry;
+        const cube = new THREE.Mesh(geometry, bodyMat);
         cube.position.copy(cellCenter(ix, iy, iz));
         group.add(cube);
         cubes.push(cube);
@@ -605,12 +607,10 @@
       }
 
       // Arrowhead: cells are stored head-first, so it points from the head away
-      // from the body (cells[0] - cells[1]) and sits just beyond the head cube.
+      // from the body (cells[0] - cells[1]). cubes[0] is the square pyramid.
       const [hx, hy, hz] = cells[0];
       const [nx, ny, nz] = cells[1];
       const dir = new THREE.Vector3(hx - nx, hy - ny, hz - nz).normalize();
-      const cone = new THREE.Mesh(coneGeometry, bodyMat);
-      group.add(cone);
 
       boardRoot.add(group);
 
@@ -622,7 +622,6 @@
         mesh: group,
         cubes,
         connectors,
-        cone,
         tweenTarget: { t: 0 },
         busy: false,
         bodyMat,
