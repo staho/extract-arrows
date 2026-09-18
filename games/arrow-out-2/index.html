@@ -64,7 +64,10 @@
       z-index: 10;
       display: flex;
       align-items: center;
-      gap: 18px;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 14px 18px;
+      max-width: calc(100% - 24px);
       padding: 12px 18px;
       background: var(--panel);
       backdrop-filter: blur(12px);
@@ -102,6 +105,78 @@
     #remaining strong {
       color: var(--ink);
       font-weight: 700;
+    }
+
+    #day-nav {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    #day-nav[hidden] {
+      display: none;
+    }
+
+    #day-label {
+      min-width: 4.8rem;
+      text-align: center;
+      font-size: 0.95rem;
+      font-weight: 600;
+    }
+
+    #day-nav button {
+      min-width: 34px;
+      padding: 6px 10px;
+      background: rgba(42, 157, 143, 0.14);
+      color: var(--ink);
+    }
+
+    #day-nav button:hover:not(:disabled) {
+      background: rgba(42, 157, 143, 0.26);
+    }
+
+    #day-nav button:disabled {
+      opacity: 0.35;
+      cursor: default;
+      transform: none;
+    }
+
+    #day-nav button:focus-visible,
+    #reset-btn:focus-visible,
+    #play-again-btn:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    @media (max-width: 640px) {
+      #hud {
+        flex-wrap: nowrap;
+        gap: 10px;
+        padding: 10px 12px;
+      }
+
+      #hud .brand,
+      #hud .divider {
+        display: none;
+      }
+
+      #remaining {
+        font-size: 0;
+      }
+
+      #remaining strong {
+        font-size: 0.95rem;
+      }
+
+      #day-label {
+        min-width: 3.2rem;
+        font-size: 0.9rem;
+      }
+
+      #reset-btn {
+        min-width: 0;
+        padding: 8px 14px;
+      }
     }
 
     button {
@@ -197,6 +272,12 @@
   <div id="hud">
     <span class="brand">Arrow Out — Grid</span>
     <span class="divider"></span>
+    <nav id="day-nav" hidden aria-label="Puzzle archive">
+      <button type="button" id="day-prev" aria-label="Previous puzzle">‹</button>
+      <span id="day-label">Today</span>
+      <button type="button" id="day-next" aria-label="Next puzzle">›</button>
+    </nav>
+    <span class="divider" id="day-divider" hidden></span>
     <span id="remaining">Remaining: <strong>0</strong></span>
     <button type="button" id="reset-btn">Reset</button>
   </div>
@@ -238,6 +319,11 @@
     const resetBtn = document.getElementById("reset-btn");
     const playAgainBtn = document.getElementById("play-again-btn");
     const winModal = document.getElementById("win-modal");
+    const dayNav = document.getElementById("day-nav");
+    const dayDivider = document.getElementById("day-divider");
+    const dayPrevBtn = document.getElementById("day-prev");
+    const dayNextBtn = document.getElementById("day-next");
+    const dayLabel = document.getElementById("day-label");
 
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 200);
@@ -814,17 +900,145 @@
     });
     window.addEventListener("keydown", (e) => {
       if (e.key === "r" || e.key === "R") resetBoard();
+      if (e.key === "ArrowLeft") {
+        const idx = currentIndex();
+        if (idx > 0) showLevel(archive[idx - 1]);
+      }
+      if (e.key === "ArrowRight") {
+        const idx = currentIndex();
+        if (idx >= 0 && idx < archive.length - 1) showLevel(archive[idx + 1]);
+      }
     });
 
-    // Load the arrow set from a static JSON file and render it. Generation lives
-    // in tools/generate-arrows.mjs; this page only draws what the file describes.
-    try {
-      const res = await fetch("./arrows.json", { cache: "no-cache" });
+    let archive = [];
+    let currentLevel = null;
+    let loadingLevel = false;
+
+    function formatDayLabel(level) {
+      if (!level) return "Today";
+      if (level.is_current) return "Today";
+      const seed = level.seed == null ? "" : String(level.seed);
+      const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(seed);
+      if (match) {
+        const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+        return date.toLocaleDateString("en-GB", {
+          day: "numeric",
+          month: "short",
+          timeZone: "UTC",
+        });
+      }
+      return seed || `#${level.id}`;
+    }
+
+    function currentIndex() {
+      if (!currentLevel) return -1;
+      return archive.findIndex((level) => level.id === currentLevel.id);
+    }
+
+    function updateDayNav() {
+      const visible = archive.length >= 1 && currentLevel != null;
+      dayNav.hidden = !visible;
+      dayDivider.hidden = !visible;
+      if (!visible) return;
+
+      const idx = currentIndex();
+      const many = archive.length > 1;
+      dayPrevBtn.hidden = !many;
+      dayNextBtn.hidden = !many;
+      dayPrevBtn.disabled = loadingLevel || idx <= 0;
+      dayNextBtn.disabled = loadingLevel || idx < 0 || idx >= archive.length - 1;
+      dayLabel.textContent = formatDayLabel(currentLevel);
+    }
+
+    function syncUrl(level) {
+      const url = new URL(window.location.href);
+      if (!level || level.is_current) {
+        url.searchParams.delete("id");
+      } else {
+        url.searchParams.set("id", String(level.id));
+      }
+      history.replaceState(null, "", url);
+    }
+
+    async function fetchJson(path) {
+      const res = await fetch(path, { cache: "no-cache" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      puzzleData = await res.json();
+      return res.json();
+    }
+
+    async function loadArchive() {
+      try {
+        const data = await fetchJson("./api/archive");
+        archive = Array.isArray(data.levels) ? data.levels : [];
+      } catch {
+        archive = [];
+      }
+    }
+
+    async function loadPuzzle(level) {
+      const path = level && !level.is_current
+        ? `./arrows.json?id=${level.id}`
+        : "./arrows.json";
+      const data = await fetchJson(path);
+      puzzleData = data;
+      currentLevel = level ?? null;
+      if (level && archive.some((row) => row.id === level.id)) {
+        currentLevel = archive.find((row) => row.id === level.id);
+      }
       buildBoard(puzzleData);
+      syncUrl(currentLevel);
+      updateDayNav();
+    }
+
+    async function showLevel(level) {
+      if (!level || loadingLevel) return;
+      if (currentLevel && currentLevel.id === level.id) return;
+      loadingLevel = true;
+      updateDayNav();
+      try {
+        await loadPuzzle(level);
+      } catch (err) {
+        console.error("Failed to load puzzle:", err);
+      } finally {
+        loadingLevel = false;
+        updateDayNav();
+      }
+    }
+
+    dayPrevBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const idx = currentIndex();
+      if (idx > 0) showLevel(archive[idx - 1]);
+    });
+    dayNextBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const idx = currentIndex();
+      if (idx >= 0 && idx < archive.length - 1) showLevel(archive[idx + 1]);
+    });
+
+    try {
+      await loadArchive();
+      const requested = Number(params.get("id"));
+      const hasId = Number.isInteger(requested) && requested > 0;
+      const fromUrl = hasId ? archive.find((level) => level.id === requested) : null;
+      const live = archive.find((level) => level.is_current) ?? null;
+      if (hasId && !fromUrl) {
+        await loadPuzzle({ id: requested, seed: null, is_current: false });
+      } else {
+        await loadPuzzle(fromUrl ?? live);
+      }
     } catch (err) {
       console.error("Failed to load arrows.json:", err);
+      try {
+        puzzleData = await fetchJson("./arrows.json");
+        buildBoard(puzzleData);
+        currentLevel = archive.find((level) => level.is_current) ?? null;
+        updateDayNav();
+      } catch (inner) {
+        console.error("Failed to load arrows.json:", inner);
+      }
     }
 
     function resize() {
