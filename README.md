@@ -57,6 +57,7 @@ Configure these repository secrets for deployment:
 |--------|---------|
 | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID |
 | `CLOUDFLARE_API_TOKEN` | API token with **Edit Cloudflare Workers** (include the `staho.dev` zone in the token scope). Add **D1 edit** if deploy should create/migrate the live-level database. |
+| `ARROW_ADMIN_TOKEN` | Same value as the arrow-out-2 Worker secret `ADMIN_TOKEN`. Used by **Publish Arrow Out 2 level** to POST a new puzzle. |
 
 `staho.dev` must be an active zone on the same Cloudflare account. On deploy, Wrangler attaches the custom domain and creates the DNS record.
 
@@ -74,12 +75,18 @@ Paste the printed `database_id` into `wrangler.jsonc`, then:
 
 ```bash
 npx wrangler d1 migrations apply arrow-out-2 --remote
-npx wrangler secret put ADMIN_TOKEN
+npx wrangler secret put ADMIN_TOKEN --name arrow-out-2
 ```
+
+Then add that **same token value** as the GitHub secret `ARROW_ADMIN_TOKEN`. Production `arrow-out-2.staho.dev` must already be the D1 Worker (merge the live-levels PR first) or publish will 404.
 
 Deploy CI also looks up or creates the `arrow-out-2` D1 database when the token has D1 edit. The current remote id is already in `wrangler.jsonc`.
 
-Publish a new live puzzle (generation stays on your machine):
+### Automated publish
+
+A new level is generated and POSTed to D1 every day at 00:00 UTC, using seed `YYYY-MM-DD`. You can also run it by hand: **Actions → Publish Arrow Out 2 level → Run workflow** (optional seed; empty uses today's UTC date).
+
+Publish from your machine:
 
 ```bash
 # generate then POST
@@ -99,7 +106,7 @@ ARROW_ADMIN_TOKEN=... npm run publish -- --current=3
 
 `--url` defaults to `https://arrow-out-2.staho.dev`. Use `--url=http://127.0.0.1:8787` against `wrangler dev`.
 
-The Worker secret `ADMIN_TOKEN` is separate from the GitHub deploy secrets. Redeploys keep it; GitHub Actions never needs the publish token.
+The Worker secret `ADMIN_TOKEN` and the GitHub secret `ARROW_ADMIN_TOKEN` must match. Redeploys keep the Worker secret.
 
 You can also run the workflow manually via **Actions → Deploy Games → Run workflow** to redeploy every valid game.
 
