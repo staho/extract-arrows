@@ -63,7 +63,7 @@ Configure these repository secrets for deployment:
 
 ## Arrow Out 2 live levels
 
-arrow-out-2 still fetches `./arrows.json`. In production the Worker intercepts that path and returns the current D1 row; if D1 is empty or unreadable it falls back to the bundled `arrows.json` asset. Past puzzles stay in D1; the HUD prev/next control loads them from `GET /api/archive` and `GET /arrows.json?id=<n>`. A shared URL can pin a past puzzle with `?id=<n>`.
+arrow-out-2 still fetches `./arrows.json`. In production the Worker intercepts that path and returns the current D1 row; if D1 is empty or unreadable it falls back to the bundled `arrows.json` asset. Past puzzles stay in D1; the HUD prev/next control loads them from `GET /api/archive` and `GET /arrows.json?id=<n>`. A shared URL can pin a past puzzle with `?id=<n>`. Each attempt has 3 lives (a blocked click costs one) and a timer that starts on the first arrow click. Wins can be posted to `POST /api/scores`; `GET /api/scores?id=<n>` returns the top 10 best times for that puzzle.
 
 One-time Cloudflare setup (from `games/arrow-out-2`):
 
