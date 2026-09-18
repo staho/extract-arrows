@@ -716,9 +716,14 @@
      *   tweenTarget: { t: number },
      *   busy: boolean,
      *   bodyMat: THREE.MeshStandardMaterial,
+     *   headMat: THREE.MeshStandardMaterial,
      *   baseColor: number,
      * }} Arrow
      */
+
+    function tintHeadColor(hex) {
+      return new THREE.Color(hex).lerp(new THREE.Color(0xffffff), 0.4);
+    }
 
     /** World position along an arrow's snake path. `s` is in cell units. */
     function pathPoint(cells, unit, s, target) {
@@ -782,6 +787,14 @@
         roughness: 0.45,
         metalness: 0.1,
       });
+      const headTint = tintHeadColor(colorHex);
+      const headMat = new THREE.MeshStandardMaterial({
+        color: headTint,
+        roughness: 0.22,
+        metalness: 0.35,
+        emissive: headTint.clone(),
+        emissiveIntensity: 0.16,
+      });
 
       const group = new THREE.Group();
       const id = (arrowIdSeq += 1);
@@ -792,7 +805,7 @@
       for (let i = 0; i < cells.length; i++) {
         const [ix, iy, iz] = cells[i];
         const geometry = i === 0 ? coneGeometry : cubeGeometry;
-        const cube = new THREE.Mesh(geometry, bodyMat);
+        const cube = new THREE.Mesh(geometry, i === 0 ? headMat : bodyMat);
         cube.position.copy(cellCenter(ix, iy, iz));
         group.add(cube);
         cubes.push(cube);
@@ -831,6 +844,7 @@
         tweenTarget: { t: 0 },
         busy: false,
         bodyMat,
+        headMat,
         baseColor: colorHex,
       };
       layoutArrow(arrow, 0);
@@ -844,7 +858,9 @@
       gsap.killTweensOf(arrow.tweenTarget);
       gsap.killTweensOf(arrow.mesh.position);
       gsap.killTweensOf(arrow.bodyMat.color);
+      gsap.killTweensOf(arrow.headMat.color);
       arrow.bodyMat.dispose();
+      arrow.headMat.dispose();
     }
 
     function clearBoard() {
@@ -1076,7 +1092,9 @@
       const origin = mesh.position.clone();
       const nudge = arrow.dir.clone().normalize().multiplyScalar(0.1);
       const bodyMat = arrow.bodyMat;
+      const headMat = arrow.headMat;
       const original = bodyMat.color.getHex();
+      const headOriginal = headMat.color.getHex();
       const gen = generationId;
       const arrowId = arrow.id;
 
@@ -1092,12 +1110,14 @@
       }
 
       bodyMat.color.setHex(0xe76f51);
+      headMat.color.setHex(0xe76f51);
 
       const tl = gsap.timeline({
         onComplete: () => {
           if (gen !== generationId || mesh.userData.arrowId !== arrowId) return;
           mesh.position.copy(origin);
           bodyMat.color.setHex(original);
+          headMat.color.setHex(headOriginal);
           arrow.busy = false;
           if (lives === 0 && gen === generationId) showResult("lose");
         },
@@ -1147,6 +1167,13 @@
               r: ((original >> 16) & 255) / 255,
               g: ((original >> 8) & 255) / 255,
               b: (original & 255) / 255,
+              duration: 0.25,
+              ease: "power1.out",
+            });
+            gsap.to(headMat.color, {
+              r: ((headOriginal >> 16) & 255) / 255,
+              g: ((headOriginal >> 8) & 255) / 255,
+              b: (headOriginal & 255) / 255,
               duration: 0.25,
               ease: "power1.out",
             });
