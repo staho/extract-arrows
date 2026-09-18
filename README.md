@@ -77,7 +77,7 @@ npx wrangler d1 migrations apply arrow-out-2 --remote
 npx wrangler secret put ADMIN_TOKEN
 ```
 
-If `database_id` is still the local placeholder, deploy CI looks up (or creates) the `arrow-out-2` D1 database when the token can access D1. If it cannot, that deploy strips the D1 binding and the game serves the bundled `arrows.json`.
+Deploy CI also looks up or creates the `arrow-out-2` D1 database when the token has D1 edit. The current remote id is already in `wrangler.jsonc`.
 
 Publish a new live puzzle (generation stays on your machine):
 

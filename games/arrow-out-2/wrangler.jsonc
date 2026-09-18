@@ -11,8 +11,7 @@
     {
       "binding": "DB",
       "database_name": "arrow-out-2",
-      // Replace with the UUID from: npx wrangler d1 create arrow-out-2
-      "database_id": "local-arrow-out-2",
+      "database_id": "1b1daeda-199b-4a1e-8478-f9aad8401191",
       "migrations_dir": "migrations"
     }
   ],
