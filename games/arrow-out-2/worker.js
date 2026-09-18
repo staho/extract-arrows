@@ -8,7 +8,11 @@ export default {
 
     try {
       if (path === "/arrows.json" && request.method === "GET") {
-        return await getCurrentArrows(request, env);
+        return await getArrows(request, env);
+      }
+
+      if (path === "/api/archive" && request.method === "GET") {
+        return await listArchive(env);
       }
 
       if (path === "/api/admin/levels" && request.method === "GET") {
@@ -41,8 +45,30 @@ export default {
   },
 };
 
-async function getCurrentArrows(request, env) {
+function arrowsResponse(payload) {
+  return new Response(payload, {
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+async function getArrows(request, env) {
+  const id = parsePositiveInt(new URL(request.url).searchParams.get("id"));
+  if (id instanceof Response) return id;
+
   try {
+    if (id != null) {
+      const row = await env.DB.prepare(
+        "SELECT payload FROM levels WHERE id = ?"
+      )
+        .bind(id)
+        .first();
+      if (!row?.payload) return jsonError(404, "level not found");
+      return arrowsResponse(row.payload);
+    }
+
     const row = await env.DB.prepare(
       `SELECT l.payload AS payload
        FROM current_level c
@@ -54,16 +80,52 @@ async function getCurrentArrows(request, env) {
       return env.ASSETS.fetch(request);
     }
 
-    return new Response(row.payload, {
-      headers: {
-        "Content-Type": "application/json; charset=utf-8",
-        "Cache-Control": "no-store",
-      },
-    });
+    return arrowsResponse(row.payload);
   } catch (err) {
+    if (id != null) {
+      console.error("d1 level read failed", err);
+      return jsonError(500, "internal error");
+    }
     console.error("d1 current level read failed; serving bundled arrows.json", err);
     return env.ASSETS.fetch(request);
   }
+}
+
+async function listArchive(env) {
+  try {
+    const result = await env.DB.prepare(
+      `SELECT l.id, l.seed, l.created_at,
+              CASE WHEN c.level_id = l.id THEN 1 ELSE 0 END AS is_current
+       FROM levels l
+       LEFT JOIN current_level c ON c.id = 1
+       ORDER BY l.id ASC
+       LIMIT 100`
+    ).all();
+
+    const levels = (result.results ?? []).map((row) => ({
+      id: row.id,
+      seed: row.seed,
+      created_at: row.created_at,
+      is_current: row.is_current === 1,
+    }));
+
+    return Response.json(
+      { levels },
+      { headers: { ...JSON_HEADERS, "Cache-Control": "no-store" } }
+    );
+  } catch (err) {
+    console.error("d1 archive list failed", err);
+    return jsonError(500, "internal error");
+  }
+}
+
+function parsePositiveInt(raw) {
+  if (raw == null || raw === "") return null;
+  const id = Number(raw);
+  if (!Number.isInteger(id) || id < 1) {
+    return jsonError(400, "id must be a positive integer");
+  }
+  return id;
 }
 
 async function listLevels(env) {
