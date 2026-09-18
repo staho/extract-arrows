@@ -56,7 +56,7 @@ Configure these repository secrets for deployment:
 | Secret | Purpose |
 |--------|---------|
 | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID |
-| `CLOUDFLARE_API_TOKEN` | API token with **Edit Cloudflare Workers** (include the `staho.dev` zone in the token scope) |
+| `CLOUDFLARE_API_TOKEN` | API token with **Edit Cloudflare Workers** (include the `staho.dev` zone in the token scope). Add **D1 edit** if deploy should create/migrate the live-level database. |
 
 `staho.dev` must be an active zone on the same Cloudflare account. On deploy, Wrangler attaches the custom domain and creates the DNS record.
 
@@ -77,7 +77,7 @@ npx wrangler d1 migrations apply arrow-out-2 --remote
 npx wrangler secret put ADMIN_TOKEN
 ```
 
-If `database_id` is still the local placeholder, deploy CI looks up (or creates) the `arrow-out-2` D1 database and patches the Worker config for that deploy only.
+If `database_id` is still the local placeholder, deploy CI looks up (or creates) the `arrow-out-2` D1 database when the token can access D1. If it cannot, that deploy strips the D1 binding and the game serves the bundled `arrows.json`.
 
 Publish a new live puzzle (generation stays on your machine):
 
