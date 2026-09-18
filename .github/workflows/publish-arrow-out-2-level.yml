@@ -1,0 +1,42 @@
+name: Publish Arrow Out 2 level
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: "Generator seed (empty = today's UTC date YYYY-MM-DD)"
+        required: false
+        type: string
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve seed
+        id: seed
+        shell: bash
+        run: |
+          set -euo pipefail
+          seed="${{ github.event.inputs.seed }}"
+          if [[ -z "${seed}" ]]; then
+            seed="$(date -u +%Y-%m-%d)"
+          fi
+          echo "seed=${seed}" >> "$GITHUB_OUTPUT"
+          echo "Using seed: ${seed}"
+
+      - name: Generate and publish
+        env:
+          ARROW_ADMIN_TOKEN: ${{ secrets.ARROW_ADMIN_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${ARROW_ADMIN_TOKEN}" ]]; then
+            echo "ARROW_ADMIN_TOKEN repository secret is not set"
+            exit 1
+          fi
+          node games/arrow-out-2/tools/publish-level.mjs --seed="${{ steps.seed.outputs.seed }}"

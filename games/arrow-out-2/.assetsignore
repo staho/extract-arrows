@@ -1,0 +1,9 @@
+wrangler.jsonc
+worker.js
+migrations/
+tools/
+.dev.vars
+.dev.vars.example
+.assetsignore
+.wrangler/
+*.md

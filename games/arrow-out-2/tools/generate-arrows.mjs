@@ -2,13 +2,13 @@
 // Arrow puzzle generator.
 //
 // Emits a static arrows.json describing a set of "arrows" that completely fill a
-// 3D grid (every cell belongs to exactly one arrow). Each arrow is a chain of
+// 3D shape (every cell belongs to exactly one arrow). Each arrow is a chain of
 // cells (it may bend) with a head at one end. Cells are stored head-first:
 // cells[0] is the head, the rest is the body. The head's facing direction is
 // cells[0] - cells[1].
 //
 // Extraction model: an arrow slides as a rigid piece in the direction its head
-// points until it leaves the grid. The corridor ahead of every cell must be
+// points until it leaves the shape. The corridor ahead of every cell must be
 // clear, so two arrows aimed at each other deadlock.
 //
 // Generation peels one "stamp" at a time off the remaining solid. A stamp is a
@@ -18,12 +18,293 @@
 // out to the exposed face. The peel axis is re-rolled every stamp so arrows
 // do not form a parallel forest. Playing carve-order solves the packing.
 //
-// Usage: node games/arrow-out-2/tools/generate-arrows.mjs [outfile]
-//   default outfile: ../arrows.json (games/arrow-out-2/arrows.json)
+// Usage:
+//   node generate-arrows.mjs [outfile] [--seed=S] [--out=FILE]
+//                            [--attempts=N] [--min-bent=0.55]
+//
+// The same --seed always produces the same arrows.json. If no seed is given a
+// random one is drawn and printed, so any run can be reproduced afterwards.
 
 import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+
+// ---------------------------------------------------------------------------
+// CLI
+// ---------------------------------------------------------------------------
+
+function parseArgs(argv) {
+  const opts = { out: null, seed: null, attempts: 40, minBent: 0.55 };
+  for (const arg of argv) {
+    if (!arg.startsWith("--")) {
+      opts.out = arg;
+      continue;
+    }
+    const eq = arg.indexOf("=");
+    const name = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
+    const val = eq === -1 ? "" : arg.slice(eq + 1);
+    switch (name) {
+      case "seed":
+        opts.seed = val;
+        break;
+      case "out":
+        opts.out = val;
+        break;
+      case "attempts":
+        opts.attempts = Math.max(1, parseInt(val, 10) || 40);
+        break;
+      case "min-bent":
+        opts.minBent = Math.min(1, Math.max(0, parseFloat(val) || 0));
+        break;
+      default:
+        console.error(`unknown option --${name}`);
+        process.exit(2);
+    }
+  }
+  return opts;
+}
+
+// ---------------------------------------------------------------------------
+// Deterministic randomness
+// ---------------------------------------------------------------------------
+
+// FNV-1a over a string; also folds an extra integer (used for per-attempt
+// sub-seeds so that "seed X, attempt 3" is stable across runs).
+function hashSeed(str, extra = 0) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  h ^= extra;
+  h = Math.imul(h, 0x01000193);
+  return h >>> 0;
+}
+
+// xoshiro128** seeded via splitmix32.
+function makeRng(seed32) {
+  let sm = seed32 >>> 0;
+  const splitmix = () => {
+    sm = (sm + 0x9e3779b9) >>> 0;
+    let z = sm;
+    z = Math.imul(z ^ (z >>> 16), 0x85ebca6b);
+    z = Math.imul(z ^ (z >>> 13), 0xc2b2ae35);
+    return (z ^ (z >>> 16)) >>> 0;
+  };
+  let a = splitmix();
+  let b = splitmix();
+  let c = splitmix();
+  let d = splitmix();
+  if ((a | b | c | d) === 0) d = 1;
+
+  const nextU32 = () => {
+    const r = Math.imul(b, 5);
+    const result = Math.imul((r << 7) | (r >>> 25), 9) >>> 0;
+    const t = b << 9;
+    c ^= a;
+    d ^= b;
+    b ^= c;
+    a ^= d;
+    c ^= t;
+    d = (d << 11) | (d >>> 21);
+    return result;
+  };
+
+  return {
+    // float in [0, 1)
+    next: () => nextU32() / 4294967296,
+    // integer in [0, n)
+    int: (n) => Math.floor((nextU32() / 4294967296) * n),
+    shuffle(arr) {
+      for (let i = arr.length - 1; i > 0; i--) {
+        const j = this.int(i + 1);
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+      }
+      return arr;
+    },
+  };
+}
+
+// Module-level handle, rebound per attempt. All randomness goes through it;
+// Math.random must never be used in this file.
+let rng = makeRng(0);
+const randInt = (n) => rng.int(n);
+const shuffle = (arr) => rng.shuffle(arr);
+
+// ---------------------------------------------------------------------------
+// Shape: the solid being packed. Everything spatial goes through this so a
+// non-cubic shape can be dropped in later without touching the carver.
+// ---------------------------------------------------------------------------
+
+const DIRS = [
+  [1, 0, 0],
+  [-1, 0, 0],
+  [0, 1, 0],
+  [0, -1, 0],
+  [0, 0, 1],
+  [0, 0, -1],
+];
+
+function axisOf(dir) {
+  if (dir[0]) return 0;
+  if (dir[1]) return 1;
+  return 2;
+}
+
+class CubeShape {
+  constructor(grid, cell) {
+    this.grid = grid;
+    this.cell = cell;
+    this.N = grid * grid * grid;
+  }
+  idx(x, y, z) {
+    const g = this.grid;
+    return (x * g + y) * g + z;
+  }
+  cellOf(i) {
+    const g = this.grid;
+    return [Math.floor(i / (g * g)), Math.floor(i / g) % g, i % g];
+  }
+  // Inside the bounding lattice. Coordinates outside are "free space" a piece
+  // can slide into.
+  inBounds(x, y, z) {
+    const g = this.grid;
+    return x >= 0 && x < g && y >= 0 && y < g && z >= 0 && z < g;
+  }
+  // Part of the solid. For a cube every bounded cell is solid; other shapes
+  // override this.
+  has(x, y, z) {
+    return this.inBounds(x, y, z);
+  }
+  *cells() {
+    const g = this.grid;
+    for (let x = 0; x < g; x++)
+      for (let y = 0; y < g; y++)
+        for (let z = 0; z < g; z++) yield [x, y, z];
+  }
+  neighborsOf([x, y, z]) {
+    const out = [];
+    if (this.has(x + 1, y, z)) out.push([x + 1, y, z]);
+    if (this.has(x - 1, y, z)) out.push([x - 1, y, z]);
+    if (this.has(x, y + 1, z)) out.push([x, y + 1, z]);
+    if (this.has(x, y - 1, z)) out.push([x, y - 1, z]);
+    if (this.has(x, y, z + 1)) out.push([x, y, z + 1]);
+    if (this.has(x, y, z - 1)) out.push([x, y, z - 1]);
+    return out;
+  }
+  // Metadata the renderer needs.
+  header() {
+    return { grid: this.grid, cell: this.cell };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Frontier: the set of still-unassigned cells, plus one bitmask per lattice
+// column on each axis so ray / exposed-face queries are O(1) instead of a
+// walk. Requires grid <= 32.
+// ---------------------------------------------------------------------------
+
+class Frontier {
+  constructor(shape) {
+    this.shape = shape;
+    this.remaining = new Set();
+    const g = shape.grid;
+    if (g > 32) throw new Error("Frontier bitmasks need grid <= 32");
+    // masks[axis][a * g + b] : bit t set  <=>  cell with coord[axis] = t remains
+    this.masks = [new Uint32Array(g * g), new Uint32Array(g * g), new Uint32Array(g * g)];
+    for (const c of shape.cells()) this.add(shape.idx(c[0], c[1], c[2]));
+  }
+  get size() {
+    return this.remaining.size;
+  }
+  has(id) {
+    return this.remaining.has(id);
+  }
+  [Symbol.iterator]() {
+    return this.remaining[Symbol.iterator]();
+  }
+  _touch(id, on) {
+    const g = this.shape.grid;
+    const c = this.shape.cellOf(id);
+    for (let axis = 0; axis < 3; axis++) {
+      const a = c[(axis + 1) % 3];
+      const b = c[(axis + 2) % 3];
+      const bit = 1 << c[axis];
+      const k = a * g + b;
+      if (on) this.masks[axis][k] |= bit;
+      else this.masks[axis][k] &= ~bit;
+    }
+  }
+  add(id) {
+    if (this.remaining.has(id)) return;
+    this.remaining.add(id);
+    this._touch(id, true);
+  }
+  delete(id) {
+    if (!this.remaining.has(id)) return;
+    this.remaining.delete(id);
+    this._touch(id, false);
+  }
+  colMask(axis, a, b) {
+    return this.masks[axis][a * this.shape.grid + b];
+  }
+  // Remaining cells in one column, ordered from the exposed end inward,
+  // stopping at the first gap so the prefix is always shadow-closed in `dir`.
+  exposedRun(dir, a, b) {
+    const axis = axisOf(dir);
+    const sign = dir[axis];
+    const A = (axis + 1) % 3;
+    const B = (axis + 2) % 3;
+    const g = this.shape.grid;
+    const mask = this.colMask(axis, a, b);
+    const cells = [];
+    const t0 = sign > 0 ? g - 1 : 0;
+    const step = sign > 0 ? -1 : 1;
+    for (let t = t0; t >= 0 && t < g; t += step) {
+      if (mask & (1 << t)) {
+        const c = [0, 0, 0];
+        c[axis] = t;
+        c[A] = a;
+        c[B] = b;
+        cells.push(c);
+      } else if (cells.length) break;
+    }
+    return cells;
+  }
+  // Rigid slide test: every cell of `cells` must see only itself or empty
+  // space along `dir` until it leaves the lattice. Because piece ⊆ remaining,
+  // "everything remaining beyond c is in the piece" is exactly
+  //   (colMask & beyond(c)) & ~pieceMask === 0.
+  canExtract(cells, dir) {
+    const axis = axisOf(dir);
+    const sign = dir[axis];
+    const A = (axis + 1) % 3;
+    const B = (axis + 2) % 3;
+    const g = this.shape.grid;
+    const self = new Map();
+    for (const c of cells) {
+      const k = c[A] * g + c[B];
+      self.set(k, (self.get(k) || 0) | (1 << c[axis]));
+    }
+    for (const c of cells) {
+      const k = c[A] * g + c[B];
+      const t = c[axis];
+      const beyond = sign > 0 ? ~((1 << (t + 1)) - 1) >>> 0 : (1 << t) - 1;
+      const other = (this.masks[axis][k] & beyond & ~self.get(k)) >>> 0;
+      if (other !== 0) return false;
+    }
+    return true;
+  }
+  // Materialize as a plain Set (for hypothetical "what remains after this
+  // piece" checks).
+  toSet() {
+    return new Set(this.remaining);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
 
 const GRID = 10;
 const CELL = 1.15;
@@ -31,37 +312,15 @@ const PALETTE_SIZE = 6;
 const MIN_LEN = 3;
 const MAX_LEN = 6;
 
-const N = GRID * GRID * GRID;
-const MIN_BENT_RATIO = 0.55;
+const shape = new CubeShape(GRID, CELL);
+const N = shape.N;
 
-const idx = (x, y, z) => (x * GRID + y) * GRID + z;
-const inBounds = (x, y, z) =>
-  x >= 0 && x < GRID && y >= 0 && y < GRID && z >= 0 && z < GRID;
+const key = (c) => shape.idx(c[0], c[1], c[2]);
+const neighborsOf = (c) => shape.neighborsOf(c);
 
-const randInt = (n) => Math.floor(Math.random() * n);
-
-function shuffle(arr) {
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = randInt(i + 1);
-    [arr[i], arr[j]] = [arr[j], arr[i]];
-  }
-  return arr;
-}
-
-function key(c) {
-  return idx(c[0], c[1], c[2]);
-}
-
-function neighborsOf([x, y, z]) {
-  const out = [];
-  if (x + 1 < GRID) out.push([x + 1, y, z]);
-  if (x - 1 >= 0) out.push([x - 1, y, z]);
-  if (y + 1 < GRID) out.push([x, y + 1, z]);
-  if (y - 1 >= 0) out.push([x, y - 1, z]);
-  if (z + 1 < GRID) out.push([x, y, z + 1]);
-  if (z - 1 >= 0) out.push([x, y, z - 1]);
-  return out;
-}
+// ---------------------------------------------------------------------------
+// Geometry helpers
+// ---------------------------------------------------------------------------
 
 function isStraight(cells) {
   if (cells.length < 2) return true;
@@ -103,42 +362,6 @@ function validLengths(n) {
   return options;
 }
 
-const DIRS = [
-  [1, 0, 0],
-  [-1, 0, 0],
-  [0, 1, 0],
-  [0, -1, 0],
-  [0, 0, 1],
-  [0, 0, -1],
-];
-
-function axisOf(dir) {
-  if (dir[0]) return 0;
-  if (dir[1]) return 1;
-  return 2;
-}
-
-// Remaining cells in one column, ordered from the exposed end inward, stopping
-// at the first gap so the prefix is always shadow-closed in `dir`.
-function exposedRun(remaining, dir, a, b) {
-  const axis = axisOf(dir);
-  const sign = dir[axis];
-  const A = (axis + 1) % 3;
-  const B = (axis + 2) % 3;
-  const cells = [];
-  const t0 = sign > 0 ? GRID - 1 : 0;
-  const step = sign > 0 ? -1 : 1;
-  for (let t = t0; t >= 0 && t < GRID; t += step) {
-    const c = [0, 0, 0];
-    c[axis] = t;
-    c[A] = a;
-    c[B] = b;
-    if (remaining.has(key(c))) cells.push(c);
-    else if (cells.length) break;
-  }
-  return cells;
-}
-
 function connected3d(cells) {
   if (cells.length === 0) return true;
   const set = new Set(cells.map(key));
@@ -169,7 +392,7 @@ function snakePath(cells, dir, remaining) {
     if (!set.has(key(snd))) continue;
     const fwd = [h[0] + dir[0], h[1] + dir[1], h[2] + dir[2]];
     if (set.has(key(fwd))) continue; // buried head
-    if (inBounds(fwd[0], fwd[1], fwd[2]) && remaining.has(key(fwd)) && !set.has(key(fwd))) {
+    if (shape.has(fwd[0], fwd[1], fwd[2]) && remaining.has(key(fwd)) && !set.has(key(fwd))) {
       continue; // someone else sits in front of the head
     }
     starts.push([h, snd]);
@@ -199,14 +422,9 @@ function snakePath(cells, dir, remaining) {
   return null;
 }
 
-function cellOf(i) {
-  const z = i % GRID;
-  const y = Math.floor(i / GRID) % GRID;
-  const x = Math.floor(i / (GRID * GRID));
-  return [x, y, z];
-}
-
-function canExtract(cells, dir, remaining) {
+// Slow, mask-free ray walk. Used by the independent verifier only, so the
+// verifier does not share code paths with the carver's fast test.
+function canExtractSlow(cells, dir, remaining) {
   const self = new Set(cells.map(key));
   const [dx, dy, dz] = dir;
   for (const [x, y, z] of cells) {
@@ -215,8 +433,8 @@ function canExtract(cells, dir, remaining) {
       const nx = x + dx * k;
       const ny = y + dy * k;
       const nz = z + dz * k;
-      if (!inBounds(nx, ny, nz)) break;
-      const id = idx(nx, ny, nz);
+      if (!shape.inBounds(nx, ny, nz)) break;
+      const id = shape.idx(nx, ny, nz);
       if (!self.has(id) && remaining.has(id)) return false;
       k++;
     }
@@ -246,18 +464,7 @@ function hasHamPath(cells) {
   return false;
 }
 
-function leftoverOk(remaining, path) {
-  const next = new Set(remaining);
-  for (const c of path) next.delete(key(c));
-  if (next.size === 0) return true;
-  const comps = remainingComponents(next);
-  for (const cells of comps) {
-    if (cells.length < MIN_LEN) return false;
-    if (cells.length <= MAX_LEN && !hasHamPath(cells)) return false;
-  }
-  return true;
-}
-
+// `remaining` may be a Frontier or a plain Set of ids.
 function remainingComponents(remaining) {
   const seen = new Set();
   const comps = [];
@@ -267,11 +474,7 @@ function remainingComponents(remaining) {
     const stack = [id];
     seen.add(id);
     while (stack.length) {
-      const i = stack.pop();
-      const z = i % GRID;
-      const y = Math.floor(i / GRID) % GRID;
-      const x = Math.floor(i / (GRID * GRID));
-      const c = [x, y, z];
+      const c = shape.cellOf(stack.pop());
       cells.push(c);
       for (const n of neighborsOf(c)) {
         const ni = key(n);
@@ -286,20 +489,32 @@ function remainingComponents(remaining) {
   return comps;
 }
 
-function tryConsumeSmall(remaining) {
-  const comps = remainingComponents(remaining);
+function leftoverOk(frontier, path) {
+  const next = frontier.toSet();
+  for (const c of path) next.delete(key(c));
+  if (next.size === 0) return true;
+  const comps = remainingComponents(next);
+  for (const cells of comps) {
+    if (cells.length < MIN_LEN) return false;
+    if (cells.length <= MAX_LEN && !hasHamPath(cells)) return false;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Carving
+// ---------------------------------------------------------------------------
+
+function tryConsumeSmall(frontier) {
+  const comps = remainingComponents(frontier);
   comps.sort((a, b) => a.length - b.length);
   if (comps.some((c) => c.length < MIN_LEN)) return null;
   for (const cells of comps) {
     if (cells.length > MAX_LEN) continue;
     const dirs = shuffle(DIRS.map((d) => d.slice()));
     for (const dir of dirs) {
-      const path = snakePath(cells, dir, remaining);
-      if (
-        path &&
-        canExtract(path, dir, remaining) &&
-        leftoverOk(remaining, path)
-      ) {
+      const path = snakePath(cells, dir, frontier);
+      if (path && frontier.canExtract(path, dir) && leftoverOk(frontier, path)) {
         return path;
       }
     }
@@ -307,17 +522,13 @@ function tryConsumeSmall(remaining) {
   return null;
 }
 
-function finalizePiece(remaining, cells, preferredDir) {
+function finalizePiece(frontier, cells, preferredDir) {
   let piece = cells.map((c) => c.slice());
   for (let step = 0; step < 6; step++) {
     if (piece.length < MIN_LEN || piece.length > MAX_LEN) return null;
-    const tinies = remainingComponents(
-      (() => {
-        const next = new Set(remaining);
-        for (const c of piece) next.delete(key(c));
-        return next;
-      })()
-    ).filter((c) => c.length < MIN_LEN);
+    const next = frontier.toSet();
+    for (const c of piece) next.delete(key(c));
+    const tinies = remainingComponents(next).filter((c) => c.length < MIN_LEN);
 
     if (tinies.length) {
       const extra = tinies[0];
@@ -335,12 +546,8 @@ function finalizePiece(remaining, cells, preferredDir) {
     const dirs = [preferredDir, ...shuffle(DIRS.map((d) => d.slice()))];
     for (const dir of dirs) {
       if (!dir) continue;
-      const path = snakePath(piece, dir, remaining);
-      if (
-        path &&
-        canExtract(path, dir, remaining) &&
-        leftoverOk(remaining, path)
-      ) {
+      const path = snakePath(piece, dir, frontier);
+      if (path && frontier.canExtract(path, dir) && leftoverOk(frontier, path)) {
         return path;
       }
     }
@@ -369,8 +576,8 @@ function randomDepths(maxes, target) {
   return null;
 }
 
-function tryStamp(remaining, preferBent) {
-  const sizes = validLengths(remaining.size);
+function tryStamp(frontier, preferBent) {
+  const sizes = validLengths(frontier.size);
   if (!sizes.length) return null;
   const dir = DIRS[randInt(DIRS.length)];
 
@@ -378,7 +585,7 @@ function tryStamp(remaining, preferBent) {
   for (let t = 0; t < 40; t++) {
     const a = randInt(GRID);
     const b = randInt(GRID);
-    const run = exposedRun(remaining, dir, a, b);
+    const run = frontier.exposedRun(dir, a, b);
     if (run.length) {
       start = { a, b, run };
       break;
@@ -386,33 +593,23 @@ function tryStamp(remaining, preferBent) {
   }
   if (!start) return null;
 
-  const runAt = (a, b) => {
-    const run = exposedRun(remaining, dir, a, b);
-    return run.length ? run : null;
-  };
-
   const nColsWanted = preferBent
     ? [2, 2, 2, 3, 3, 3][randInt(6)]
     : [1, 1, 2][randInt(3)];
 
-  const cols = [{ a: start.a, b: start.b, run: start.run }];
+  const cols = [start];
   const seen = new Set([`${start.a},${start.b}`]);
   while (cols.length < nColsWanted) {
     const nbs = [];
     for (const c of cols) {
-      for (const [da, db] of [
-        [1, 0],
-        [-1, 0],
-        [0, 1],
-        [0, -1],
-      ]) {
+      for (const [da, db] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
         const na = c.a + da;
         const nb = c.b + db;
         if (na < 0 || na >= GRID || nb < 0 || nb >= GRID) continue;
         const k = `${na},${nb}`;
         if (seen.has(k)) continue;
-        const run = runAt(na, nb);
-        if (run) nbs.push({ a: na, b: nb, run });
+        const run = frontier.exposedRun(dir, na, nb);
+        if (run.length) nbs.push({ a: na, b: nb, run });
       }
     }
     if (!nbs.length) break;
@@ -446,36 +643,32 @@ function tryStamp(remaining, preferBent) {
   }
   if (cells.length !== target) return null;
   if (!connected3d(cells)) return null;
-  if (preferBent && isStraight(cells) && remaining.size > 24) return null;
+  if (preferBent && isStraight(cells) && frontier.size > 24) return null;
 
-  const path = snakePath(cells, dir, remaining);
+  const path = snakePath(cells, dir, frontier);
   if (!path) return null;
-  return finalizePiece(remaining, path, dir);
+  return finalizePiece(frontier, path, dir);
 }
 
-function tryRod(remaining) {
-  const sizes = validLengths(remaining.size);
+function tryRod(frontier) {
+  const sizes = validLengths(frontier.size);
   if (!sizes.length) return null;
-  const ids = shuffle([...remaining]);
+  const ids = shuffle([...frontier]);
   const sample = ids.length > 120 ? ids.slice(0, 120) : ids;
   for (const id of sample) {
-    const c = cellOf(id);
+    const c = shape.cellOf(id);
     for (const dir of shuffle(DIRS.map((d) => d.slice()))) {
       const fwd = [c[0] + dir[0], c[1] + dir[1], c[2] + dir[2]];
-      if (inBounds(fwd[0], fwd[1], fwd[2]) && remaining.has(key(fwd))) continue;
+      if (shape.has(fwd[0], fwd[1], fwd[2]) && frontier.has(key(fwd))) continue;
       const run = [c];
       let p = [c[0] - dir[0], c[1] - dir[1], c[2] - dir[2]];
-      while (
-        run.length < MAX_LEN &&
-        inBounds(p[0], p[1], p[2]) &&
-        remaining.has(key(p))
-      ) {
+      while (run.length < MAX_LEN && shape.has(p[0], p[1], p[2]) && frontier.has(key(p))) {
         run.push(p);
         p = [p[0] - dir[0], p[1] - dir[1], p[2] - dir[2]];
       }
       for (const len of shuffle(sizes.slice())) {
         if (len > run.length) continue;
-        const path = finalizePiece(remaining, run.slice(0, len), dir);
+        const path = finalizePiece(frontier, run.slice(0, len), dir);
         if (path) return path;
       }
     }
@@ -483,35 +676,34 @@ function tryRod(remaining) {
   return null;
 }
 
-function tryCarveOne(remaining) {
-  if (remaining.size <= 120) {
-    const small = tryConsumeSmall(remaining);
+function tryCarveOne(frontier) {
+  if (frontier.size <= 120) {
+    const small = tryConsumeSmall(frontier);
     if (small) return small;
-    const rod = tryRod(remaining);
+    const rod = tryRod(frontier);
     if (rod) return rod;
   }
   for (let i = 0; i < 80; i++) {
-    const preferBent = remaining.size > 180 && i < 64;
-    const path = tryStamp(remaining, preferBent);
+    const preferBent = frontier.size > 180 && i < 64;
+    const path = tryStamp(frontier, preferBent);
     if (path) return path;
   }
-  return tryRod(remaining) || tryConsumeSmall(remaining);
+  return tryRod(frontier) || tryConsumeSmall(frontier);
 }
 
 function carvePacking() {
-  const remaining = new Set();
-  for (let i = 0; i < N; i++) remaining.add(i);
+  const frontier = new Frontier(shape);
   const arrows = [];
   let best = N;
   let sinceBest = 0;
 
-  while (remaining.size > 0) {
-    const path = tryCarveOne(remaining);
+  while (frontier.size > 0) {
+    const path = tryCarveOne(frontier);
     if (path) {
-      for (const c of path) remaining.delete(key(c));
+      for (const c of path) frontier.delete(key(c));
       arrows.push({ id: arrows.length, path });
-      if (remaining.size < best) {
-        best = remaining.size;
+      if (frontier.size < best) {
+        best = frontier.size;
         sinceBest = 0;
       } else if (++sinceBest > 40) {
         return null;
@@ -520,11 +712,16 @@ function carvePacking() {
     }
     if (arrows.length === 0) return null;
     const last = arrows.pop();
-    for (const c of last.path) remaining.add(key(c));
+    for (const c of last.path) frontier.add(key(c));
     if (++sinceBest > 40) return null;
   }
   return arrows;
 }
+
+// ---------------------------------------------------------------------------
+// Independent verifier: replays extraction with fixed heads on the emitted
+// JSON. Deliberately uses the slow ray walk, not the Frontier masks.
+// ---------------------------------------------------------------------------
 
 function verifyFixed(outputArrows) {
   const packed = outputArrows.map((a, id) => ({
@@ -551,8 +748,8 @@ function verifyFixed(outputArrows) {
         const nx = x + dx * k;
         const ny = y + dy * k;
         const nz = z + dz * k;
-        if (!inBounds(nx, ny, nz)) break;
-        const o = occ[idx(nx, ny, nz)];
+        if (!shape.inBounds(nx, ny, nz)) break;
+        const o = occ[shape.idx(nx, ny, nz)];
         if (o !== -1 && o !== a.id) blockers.add(o);
         k++;
       }
@@ -576,8 +773,8 @@ function verifyFixed(outputArrows) {
     const nx = h[0] + dx;
     const ny = h[1] + dy;
     const nz = h[2] + dz;
-    if (!inBounds(nx, ny, nz)) continue;
-    const other = headDirAt.get(idx(nx, ny, nz));
+    if (!shape.inBounds(nx, ny, nz)) continue;
+    const other = headDirAt.get(shape.idx(nx, ny, nz));
     if (!other) continue;
     if (other[0] === -dx && other[1] === -dy && other[2] === -dz) headOnHead++;
   }
@@ -588,7 +785,7 @@ function verifyFixed(outputArrows) {
   while (left.size) {
     let moved = false;
     for (const id of left) {
-      if (canExtract(packed[id].path, packed[id].dir, remaining)) {
+      if (canExtractSlow(packed[id].path, packed[id].dir, remaining)) {
         for (const c of packed[id].path) {
           remaining.delete(key(c));
           occ[key(c)] = -1;
@@ -600,20 +797,17 @@ function verifyFixed(outputArrows) {
       }
     }
     if (!moved) {
-      return {
-        ok: false,
-        remaining: left.size,
-        mutual,
-        headOnHead,
-        extractable,
-        pulls,
-      };
+      return { ok: false, remaining: left.size, mutual, headOnHead, extractable, pulls };
     }
   }
   return { ok: true, remaining: 0, mutual, headOnHead, extractable, pulls };
 }
 
-function packOnce() {
+// ---------------------------------------------------------------------------
+// Driver
+// ---------------------------------------------------------------------------
+
+function packOnce(minBent) {
   const arrows = carvePacking();
   if (!arrows) {
     process.stderr.write("skip: carve stuck\n");
@@ -625,10 +819,8 @@ function packOnce() {
   }));
   const bent = outputArrows.filter((a) => !isStraight(a.cells)).length;
   const ratio = bent / outputArrows.length;
-  if (ratio < MIN_BENT_RATIO) {
-    process.stderr.write(
-      `skip: bent ${(ratio * 100).toFixed(0)}% of ${outputArrows.length}\n`
-    );
+  if (ratio < minBent) {
+    process.stderr.write(`skip: bent ${(ratio * 100).toFixed(0)}% of ${outputArrows.length}\n`);
     return null;
   }
   const check = verifyFixed(outputArrows);
@@ -641,36 +833,57 @@ function packOnce() {
   return { outputArrows, bent, check };
 }
 
+const opts = parseArgs(process.argv.slice(2));
+const seed =
+  opts.seed !== null && opts.seed !== ""
+    ? String(opts.seed)
+    : String(Date.now() ^ Math.floor(Math.random() * 0xffffffff)); // only place Math.random is allowed
+
 let packed = null;
 let attempt = 0;
-for (; attempt < 40; attempt++) {
-  packed = packOnce();
+for (; attempt < opts.attempts; attempt++) {
+  rng = makeRng(hashSeed(seed, attempt));
+  packed = packOnce(opts.minBent);
   if (packed) break;
-  if (!packed) process.stderr.write(`attempt ${attempt + 1} failed\n`);
+  process.stderr.write(`attempt ${attempt + 1} failed\n`);
 }
 if (!packed) {
-  console.error("Could not carve a bent, solvable packing; aborting.");
+  console.error(`Could not carve a bent, solvable packing for seed "${seed}"; aborting.`);
   process.exit(1);
 }
 
 const { outputArrows, bent, check } = packed;
-const data = { grid: GRID, cell: CELL, arrows: outputArrows };
+const totalCells = outputArrows.reduce((n, a) => n + a.cells.length, 0);
+const turns = outputArrows.reduce((n, a) => n + bendCount(a.cells), 0);
 
-const outArg = process.argv[2];
+const data = {
+  ...shape.header(),
+  seed,
+  attempt: attempt + 1,
+  stats: {
+    arrows: outputArrows.length,
+    cells: totalCells,
+    fill: +(totalCells / N).toFixed(4),
+    bent,
+    corners: turns,
+    pulls: check.pulls,
+    freeAtStart: check.extractable,
+  },
+  arrows: outputArrows,
+};
+
 const here = dirname(fileURLToPath(import.meta.url));
-const outPath = outArg
-  ? resolve(process.cwd(), outArg)
+const outPath = opts.out
+  ? resolve(process.cwd(), opts.out)
   : resolve(here, "..", "arrows.json");
 
 writeFileSync(outPath, JSON.stringify(data, null, 2) + "\n");
 
-const totalCells = outputArrows.reduce((n, a) => n + a.cells.length, 0);
-const turns = outputArrows.reduce((n, a) => n + bendCount(a.cells), 0);
 console.log(
   `Wrote ${outputArrows.length} arrows (${totalCells} cells, ` +
     `${((totalCells / N) * 100).toFixed(1)}% fill, ${bent} bent ` +
     `(${((bent / outputArrows.length) * 100).toFixed(0)}%), ${turns} corners; ` +
     `solvable in ${check.pulls} pulls, ${check.extractable} free at start, ` +
     `${check.mutual} mutual deadlocks, ${check.headOnHead} head-on-head; ` +
-    `attempt ${attempt + 1}) to ${outPath}`
+    `seed ${seed}, attempt ${attempt + 1}) to ${outPath}`
 );

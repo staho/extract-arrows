@@ -7,6 +7,7 @@ on:
     paths:
       - "games/**"
       - ".github/workflows/deploy-games.yml"
+      - ".github/scripts/**"
   workflow_dispatch:
 
 jobs:
@@ -49,7 +50,8 @@ jobs:
             before="${{ github.event.before }}"
             # Redeploy every game when the workflow itself changes (tooling/config fixes)
             if [[ -n "$before" && ! "$before" =~ ^0+$ ]] && \
-               git diff --name-only "$before" "${{ github.sha }}" -- .github/workflows/deploy-games.yml | grep -q .; then
+               git diff --name-only "$before" "${{ github.sha }}" -- \
+                 .github/workflows/deploy-games.yml .github/scripts | grep -q .; then
               list_all_games
             elif [[ -z "$before" || "$before" =~ ^0+$ ]]; then
               list_all_games
@@ -91,6 +93,14 @@ jobs:
         game: ${{ fromJson(needs.detect.outputs.games) }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Ensure D1 and apply migrations
+        working-directory: games/${{ matrix.game }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/ensure-d1.sh"
 
       - name: Deploy ${{ matrix.game }}
         uses: cloudflare/wrangler-action@v3

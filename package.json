@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "generate": "node games/arrow-out-2/tools/generate-arrows.mjs",
+    "publish": "node games/arrow-out-2/tools/publish-level.mjs",
     "serve": "python3 -m http.server 8000"
   }
 }
