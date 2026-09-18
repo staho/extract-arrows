@@ -114,6 +114,25 @@ jobs:
           echo "Preview Worker: $preview_name"
           cat wrangler.jsonc
 
+      - name: Apply D1 migrations
+        working-directory: games/${{ matrix.game }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -d migrations ]]; then
+            echo "No D1 migrations; skipping."
+            exit 0
+          fi
+          db_name=$(sed 's|//.*||' wrangler.jsonc | jq -r '.d1_databases[0].database_name // empty')
+          if [[ -z "$db_name" || "$db_name" == "null" ]]; then
+            echo "migrations/ is present but wrangler.jsonc has no d1_databases[0].database_name"
+            exit 1
+          fi
+          npx --yes wrangler@4 d1 migrations apply "$db_name" --remote
+
       - name: Deploy ${{ matrix.game }} preview
         uses: cloudflare/wrangler-action@v3
         with:
