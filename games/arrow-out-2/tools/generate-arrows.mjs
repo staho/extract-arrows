@@ -21,6 +21,23 @@
 // Usage:
 //   node generate-arrows.mjs [outfile] [--seed=S] [--out=FILE]
 //                            [--attempts=N] [--min-bent=0.55]
+//                            [--grower=walk|stamp] [--max-len=10] [--turn-bias=0.7]
+//                            [--min-fill=0.9] [--min-corners=2] [--best=1]
+//
+// --min-fill   the carver may leave up to (1-min-fill) of the cells empty.
+//              Voids are spent only where the packing would otherwise need a
+//              rod or a stunted piece, so they buy twistiness, not sparsity.
+// --min-corners pieces with fewer corners are rejected (softly) while the
+//              solid is still large.
+// --best       generate this many valid packs and keep the one with the
+//              most corners per cell.
+//
+// Growers:
+//   stamp  1–3 adjacent shadow-closed columns (U / L / S shapes). The original.
+//   walk   shadow-closed random walk over the exposed surface: each new cell
+//          is a neighbour of the tail whose ray in the peel direction is
+//          already piece-or-empty, so the piece stays extractable by
+//          construction. Produces hooks, staircases and spirals. Default.
 //
 // The same --seed always produces the same arrows.json. If no seed is given a
 // random one is drawn and printed, so any run can be reproduced afterwards.
@@ -34,7 +51,18 @@ import { dirname, resolve } from "node:path";
 // ---------------------------------------------------------------------------
 
 function parseArgs(argv) {
-  const opts = { out: null, seed: null, attempts: 40, minBent: 0.55 };
+  const opts = {
+    out: null,
+    seed: null,
+    attempts: 40,
+    minBent: 0.55,
+    grower: "walk",
+    maxLen: 10,
+    turnBias: 0.7,
+    minFill: 0.9,
+    minCorners: 2,
+    best: 1,
+  };
   for (const arg of argv) {
     if (!arg.startsWith("--")) {
       opts.out = arg;
@@ -55,6 +83,28 @@ function parseArgs(argv) {
         break;
       case "min-bent":
         opts.minBent = Math.min(1, Math.max(0, parseFloat(val) || 0));
+        break;
+      case "grower":
+        if (val !== "walk" && val !== "stamp") {
+          console.error("--grower must be walk or stamp");
+          process.exit(2);
+        }
+        opts.grower = val;
+        break;
+      case "max-len":
+        opts.maxLen = Math.max(3, parseInt(val, 10) || 10);
+        break;
+      case "turn-bias":
+        opts.turnBias = Math.min(1, Math.max(0, parseFloat(val) || 0));
+        break;
+      case "min-fill":
+        opts.minFill = Math.min(1, Math.max(0.5, parseFloat(val) || 1));
+        break;
+      case "min-corners":
+        opts.minCorners = Math.max(0, parseInt(val, 10) || 0);
+        break;
+      case "best":
+        opts.best = Math.max(1, parseInt(val, 10) || 1);
         break;
       default:
         console.error(`unknown option --${name}`);
@@ -271,6 +321,17 @@ class Frontier {
     }
     return cells;
   }
+  // Is the ray from cell `c` in `dir` free of anything except the given
+  // piece? `pieceMask` is the piece's bits in c's column (may be 0).
+  rayClear(c, dir, pieceMask = 0) {
+    const axis = axisOf(dir);
+    const sign = dir[axis];
+    const g = this.shape.grid;
+    const k = c[(axis + 1) % 3] * g + c[(axis + 2) % 3];
+    const t = c[axis];
+    const beyond = sign > 0 ? ~((1 << (t + 1)) - 1) >>> 0 : (1 << t) - 1;
+    return ((this.masks[axis][k] & beyond & ~pieceMask) >>> 0) === 0;
+  }
   // Rigid slide test: every cell of `cells` must see only itself or empty
   // space along `dir` until it leaves the lattice. Because piece ⊆ remaining,
   // "everything remaining beyond c is in the piece" is exactly
@@ -310,7 +371,11 @@ const GRID = 10;
 const CELL = 1.15;
 const PALETTE_SIZE = 6;
 const MIN_LEN = 3;
-const MAX_LEN = 6;
+let MAX_LEN = 10; // overridden by --max-len
+let TURN_BIAS = 0.7; // overridden by --turn-bias
+let GROWER = "walk"; // overridden by --grower
+let VOID_BUDGET = 0; // cells the carver may leave empty (--min-fill)
+let MIN_CORNERS = 2; // soft per-piece minimum (--min-corners)
 
 const shape = new CubeShape(GRID, CELL);
 const N = shape.N;
@@ -508,8 +573,9 @@ function leftoverOk(frontier, path) {
 function tryConsumeSmall(frontier) {
   const comps = remainingComponents(frontier);
   comps.sort((a, b) => a.length - b.length);
-  if (comps.some((c) => c.length < MIN_LEN)) return null;
+  if (comps.some((c) => c.length < MIN_LEN) && VOID_BUDGET === 0) return null;
   for (const cells of comps) {
+    if (cells.length < MIN_LEN) continue;
     if (cells.length > MAX_LEN) continue;
     const dirs = shuffle(DIRS.map((d) => d.slice()));
     for (const dir of dirs) {
@@ -650,6 +716,97 @@ function tryStamp(frontier, preferBent) {
   return finalizePiece(frontier, path, dir);
 }
 
+// Shadow-closed random walk.
+//
+// A piece extracts in `dir` iff it is a union of column prefixes measured
+// from the exposed face. As a head-first path that means: start on the
+// exposed face, dive down a column, and whenever the path moves sideways at
+// depth d into a fresh column it must immediately climb that column back to
+// its exposed cell (consuming d+1 cells) — otherwise the cells above would
+// block the slide. Moving sideways into a column whose upper cells are
+// already ours is free. Steps: dive / surface step / lateral+climb.
+// The result is always extractable in `dir`; shapes range from L and U to
+// staircases, hooks and spirals wrapped around the peel axis.
+function tryWalk(frontier) {
+  const sizes = validLengths(frontier.size);
+  if (!sizes.length) return null;
+  const dir = DIRS[randInt(DIRS.length)];
+  const axis = axisOf(dir);
+  const A = (axis + 1) % 3;
+  const B = (axis + 2) % 3;
+  const g = GRID;
+
+  let head = null;
+  for (let t = 0; t < 40 && !head; t++) {
+    const run = frontier.exposedRun(dir, randInt(g), randInt(g));
+    if (run.length >= 2) head = run[0];
+  }
+  if (!head) return null;
+
+  // Prefer long pieces: half the time take the longest legal size.
+  const target = rng.next() < 0.5 ? sizes[sizes.length - 1] : sizes[randInt(sizes.length)];
+
+  const path = [head, [head[0] - dir[0], head[1] - dir[1], head[2] - dir[2]]];
+  const inPiece = new Set(path.map(key));
+  let lastStepAxis = axis;
+
+  const stepAxisOf = (from, to) => (to[0] !== from[0] ? 0 : to[1] !== from[1] ? 1 : 2);
+
+  while (path.length < target) {
+    const tail = path[path.length - 1];
+    const room = target - path.length;
+    const cands = []; // each: { cells: [...to append], stepAxis }
+
+    for (const nb of neighborsOf(tail)) {
+      const id = key(nb);
+      if (inPiece.has(id) || !frontier.has(id)) continue;
+      const stepAxis = stepAxisOf(tail, nb);
+
+      if (stepAxis === axis) {
+        // Along the peel axis. Only dives are possible: the cell above the
+        // tail is either ours or already empty, so it can never be remaining.
+        cands.push({ cells: [nb], stepAxis });
+        continue;
+      }
+
+      // Lateral. Inspect nb's column from the exposed face down to nb.
+      const run = frontier.exposedRun(dir, nb[A], nb[B]);
+      const d = run.findIndex((c) => c[axis] === nb[axis]);
+      if (d === -1) continue; // nb is below a gap: not in the exposed run
+      let ours = 0;
+      for (let i = 0; i < d; i++) if (inPiece.has(key(run[i]))) ours++;
+      if (ours === d) {
+        cands.push({ cells: [nb], stepAxis }); // under our own body, or d = 0
+      } else if (ours === 0 && d + 1 <= room) {
+        const cells = [];
+        for (let i = d; i >= 0; i--) cells.push(run[i]); // step in, then climb
+        cands.push({ cells, stepAxis });
+      }
+      // mixed ownership above nb: skip
+    }
+    if (!cands.length) break;
+
+    const turns = cands.filter((c) => c.stepAxis !== lastStepAxis);
+    const pool = turns.length && rng.next() < TURN_BIAS ? turns : cands;
+    const pick = pool[randInt(pool.length)];
+    for (const c of pick.cells) {
+      path.push(c);
+      inPiece.add(key(c));
+    }
+    // After a climb the last move was along the peel axis.
+    lastStepAxis = pick.cells.length > 1 ? axis : pick.stepAxis;
+  }
+
+  if (path.length < MIN_LEN || !sizes.includes(path.length)) return null;
+  if (isStraight(path) && frontier.size > 24 && rng.next() < 0.8) return null;
+  // Soft corner floor. With a void budget the endgame no longer needs rods
+  // to finish, so the floor is enforced all the way down.
+  const strictZone = VOID_BUDGET > 0 || frontier.size > 60;
+  if (bendCount(path) < MIN_CORNERS && strictZone && rng.next() < 0.85) return null;
+  if (!frontier.canExtract(path, dir)) return null; // belt and braces
+  return finalizePiece(frontier, path, dir);
+}
+
 function tryRod(frontier) {
   const sizes = validLengths(frontier.size);
   if (!sizes.length) return null;
@@ -677,25 +834,49 @@ function tryRod(frontier) {
 }
 
 function tryCarveOne(frontier) {
-  if (frontier.size <= 120) {
+  // Without a void budget the endgame must be closed with whatever fits, so
+  // rods and exact small components go first. With a budget, twisty pieces
+  // stay first and leftovers that resist them become voids instead.
+  if (frontier.size <= 120 && VOID_BUDGET === 0) {
     const small = tryConsumeSmall(frontier);
     if (small) return small;
     const rod = tryRod(frontier);
     if (rod) return rod;
   }
   for (let i = 0; i < 80; i++) {
-    const preferBent = frontier.size > 180 && i < 64;
-    const path = tryStamp(frontier, preferBent);
+    const path =
+      GROWER === "walk"
+        ? tryWalk(frontier)
+        : tryStamp(frontier, frontier.size > 180 && i < 64);
     if (path) return path;
   }
+  if (VOID_BUDGET > 0) return tryConsumeSmall(frontier) || (frontier.size > 6 ? null : tryRod(frontier));
   return tryRod(frontier) || tryConsumeSmall(frontier);
 }
 
 function carvePacking() {
   const frontier = new Frontier(shape);
   const arrows = [];
+  const voids = [];
   let best = N;
   let sinceBest = 0;
+
+  // Spend void budget on the leftovers that can never become a snake:
+  // components smaller than MIN_LEN, or small blobs with no Hamiltonian path.
+  const voidDeadLeftovers = () => {
+    let spent = false;
+    for (const comp of remainingComponents(frontier)) {
+      const dead =
+        comp.length < MIN_LEN || (comp.length <= MAX_LEN && !hasHamPath(comp));
+      if (!dead || voids.length + comp.length > VOID_BUDGET) continue;
+      for (const c of comp) {
+        frontier.delete(key(c));
+        voids.push(c);
+      }
+      spent = true;
+    }
+    return spent;
+  };
 
   while (frontier.size > 0) {
     const path = tryCarveOne(frontier);
@@ -710,12 +891,25 @@ function carvePacking() {
       }
       continue;
     }
+    if (voidDeadLeftovers()) continue;
+    // Nothing twisty fits: sacrifice the smallest leftover blob if we can.
+    if (VOID_BUDGET > 0) {
+      const comps = remainingComponents(frontier).sort((a, b) => a.length - b.length);
+      const blob = comps[0];
+      if (blob && blob.length <= MAX_LEN && voids.length + blob.length <= VOID_BUDGET) {
+        for (const c of blob) {
+          frontier.delete(key(c));
+          voids.push(c);
+        }
+        continue;
+      }
+    }
     if (arrows.length === 0) return null;
     const last = arrows.pop();
     for (const c of last.path) frontier.add(key(c));
     if (++sinceBest > 40) return null;
   }
-  return arrows;
+  return { arrows, voids };
 }
 
 // ---------------------------------------------------------------------------
@@ -808,11 +1002,12 @@ function verifyFixed(outputArrows) {
 // ---------------------------------------------------------------------------
 
 function packOnce(minBent) {
-  const arrows = carvePacking();
-  if (!arrows) {
+  const carved = carvePacking();
+  if (!carved) {
     process.stderr.write("skip: carve stuck\n");
     return null;
   }
+  const { arrows, voids } = carved;
   const outputArrows = arrows.map((arrow) => ({
     color: randInt(PALETTE_SIZE),
     cells: arrow.path.map(([x, y, z]) => [x, y, z]),
@@ -830,10 +1025,16 @@ function packOnce(minBent) {
     );
     return null;
   }
-  return { outputArrows, bent, check };
+  const corners = outputArrows.reduce((n, a) => n + bendCount(a.cells), 0);
+  return { outputArrows, voids, bent, corners, check };
 }
 
 const opts = parseArgs(process.argv.slice(2));
+MAX_LEN = opts.maxLen;
+TURN_BIAS = opts.turnBias;
+GROWER = opts.grower;
+MIN_CORNERS = opts.minCorners;
+VOID_BUDGET = Math.floor((1 - opts.minFill) * N);
 const seed =
   opts.seed !== null && opts.seed !== ""
     ? String(opts.seed)
@@ -841,18 +1042,27 @@ const seed =
 
 let packed = null;
 let attempt = 0;
-for (; attempt < opts.attempts; attempt++) {
+let successes = 0;
+for (; attempt < opts.attempts && successes < opts.best; attempt++) {
   rng = makeRng(hashSeed(seed, attempt));
-  packed = packOnce(opts.minBent);
-  if (packed) break;
-  process.stderr.write(`attempt ${attempt + 1} failed\n`);
+  const cand = packOnce(opts.minBent);
+  if (!cand) {
+    process.stderr.write(`attempt ${attempt + 1} failed\n`);
+    continue;
+  }
+  successes++;
+  const cells = (p) => p.outputArrows.reduce((n, a) => n + a.cells.length, 0);
+  if (!packed || cand.corners / cells(cand) > packed.corners / cells(packed)) {
+    packed = { ...cand, attempt: attempt + 1 };
+  }
 }
 if (!packed) {
   console.error(`Could not carve a bent, solvable packing for seed "${seed}"; aborting.`);
   process.exit(1);
 }
 
-const { outputArrows, bent, check } = packed;
+const { outputArrows, voids, bent, check } = packed;
+attempt = packed.attempt - 1;
 const totalCells = outputArrows.reduce((n, a) => n + a.cells.length, 0);
 const turns = outputArrows.reduce((n, a) => n + bendCount(a.cells), 0);
 
@@ -860,16 +1070,20 @@ const data = {
   ...shape.header(),
   seed,
   attempt: attempt + 1,
+  grower: GROWER,
   stats: {
     arrows: outputArrows.length,
     cells: totalCells,
     fill: +(totalCells / N).toFixed(4),
     bent,
     corners: turns,
+    meanLength: +(totalCells / outputArrows.length).toFixed(2),
     pulls: check.pulls,
     freeAtStart: check.extractable,
+    voids: voids.length,
   },
   arrows: outputArrows,
+  voids,
 };
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -882,7 +1096,8 @@ writeFileSync(outPath, JSON.stringify(data, null, 2) + "\n");
 console.log(
   `Wrote ${outputArrows.length} arrows (${totalCells} cells, ` +
     `${((totalCells / N) * 100).toFixed(1)}% fill, ${bent} bent ` +
-    `(${((bent / outputArrows.length) * 100).toFixed(0)}%), ${turns} corners; ` +
+    `(${((bent / outputArrows.length) * 100).toFixed(0)}%), ${turns} corners, ` +
+    `mean len ${(totalCells / outputArrows.length).toFixed(2)}, ${voids.length} voids; ` +
     `solvable in ${check.pulls} pulls, ${check.extractable} free at start, ` +
     `${check.mutual} mutual deadlocks, ${check.headOnHead} head-on-head; ` +
     `seed ${seed}, attempt ${attempt + 1}) to ${outPath}`
