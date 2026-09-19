@@ -49,6 +49,72 @@ npx wrangler dev --persist-to=../../.wrangler/arrow-out-2
 
 Keep `--persist-to` outside `games/arrow-out-2` so D1's local SQLite files do not trigger Wrangler's asset watcher. Do not commit `.dev.vars` (it holds the local admin token).
 
+## Generating Arrow Out 2 puzzles
+
+`npm run generate` runs [`games/arrow-out-2/tools/generate-arrows.mjs`](games/arrow-out-2/tools/generate-arrows.mjs) and writes [`games/arrow-out-2/arrows.json`](games/arrow-out-2/arrows.json), the bundled fallback the game loads.
+
+Recommended:
+
+```bash
+npm run generate -- --seed=<s> --max-len=10 --min-corners=3
+```
+
+The same `--seed` always produces the same packing. If omitted, a random seed is drawn and printed so you can reproduce the run.
+
+Pieces are chains of **3–10** cells (`--max-len=10`). Default grower is `walk` (hooks, staircases, spirals). `--grower=stamp` is the older 1–3 column peel (lengths summing to 3–6).
+
+Other flags:
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--max-len` | 10 | Max cells per piece. |
+| `--min-corners` | 2 | Soft per-piece corner floor (85% rejection below it). Use **3**. |
+| `--min-fill` | 0.9 | Void budget of `(1 - min-fill)` of the cube. Voids are spent only when a leftover blob cannot become a twisty snake. |
+| `--best` | 1 | Generate this many valid packs; keep the one with most corners per cell. |
+| `--grower` | `walk` | `walk` or `stamp`. |
+| `--turn-bias` | 0.7 | Bias toward turning vs continuing straight (`walk` grower). |
+| `--attempts` | 40 | Max packing attempts for the seed. |
+| `--min-bent` | 0.55 | Minimum fraction of non-straight pieces. |
+
+On the 10³ cube the void budget is a safety valve, not a hole punch: with `--min-fill=0.9 --min-corners=3` the backtracker still closes the cube (100% fill, `voids: []`). Extra twist comes from the corner floor and endgame reorder, not from empty cells.
+
+### `arrows.json` contract
+
+The generator (and the D1 `payload` blob, which stores the same JSON) looks like:
+
+```json
+{
+  "grid": 10,
+  "cell": 1.15,
+  "seed": "local-walk",
+  "attempt": 1,
+  "grower": "walk",
+  "stats": {
+    "arrows": 129,
+    "cells": 1000,
+    "fill": 1,
+    "bent": 126,
+    "corners": 642,
+    "meanLength": 7.75,
+    "pulls": 129,
+    "freeAtStart": 49,
+    "voids": 0
+  },
+  "arrows": [{ "color": 0, "cells": [[x, y, z], "..."] }],
+  "voids": []
+}
+```
+
+- `grid`, `cell` — lattice; the renderer expects `grid === 10` and `cell === 1.15`.
+- `seed` — string used for the run (the HUD already displays date-like seeds such as `YYYY-MM-DD`).
+- `attempt` — which packing attempt succeeded.
+- `grower` — `"walk"` or `"stamp"`.
+- `arrows[]` — `{ color, cells }`. Cells are stored **head-first**; the facing direction is `cells[0] - cells[1]`. Each piece is **3–10** cells.
+- `voids` — leftover empty cells `[[x, y, z], ...]`. Usually `[]` on the cube.
+- `stats` — `{ arrows, cells, fill, bent, corners, meanLength, pulls, freeAtStart, voids }`.
+
+The playable contract is occupancy from `arrows[].cells`. `voids` cells are unoccupied; extraction corridors through them are already treated as clear. Extra metadata fields are ignored by the renderer.
+
 ## GitHub secrets
 
 Configure these repository secrets for deployment:
@@ -93,7 +159,7 @@ Publish from your machine:
 ARROW_ADMIN_TOKEN=... npm run publish -- --seed=42
 
 # or publish an existing file
-node games/arrow-out-2/tools/generate-arrows.mjs --seed=42 --out=/tmp/level.json
+node games/arrow-out-2/tools/generate-arrows.mjs --seed=42 --max-len=10 --min-corners=3 --out=/tmp/level.json
 ARROW_ADMIN_TOKEN=... npm run publish -- --file=/tmp/level.json
 ```
 
