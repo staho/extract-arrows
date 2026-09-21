@@ -441,7 +441,7 @@
     <button type="button" id="reset-btn">Reset</button>
   </div>
 
-  <div id="hint">Drag to orbit · Click an arrow to remove it</div>
+  <div id="hint">Drag to orbit · Hold an arrow to remove it</div>
 
   <div id="result-modal" role="dialog" aria-modal="true" aria-labelledby="result-title">
     <div class="card">
@@ -915,6 +915,7 @@
     }
 
     function clearBoard() {
+      clearHold({ restore: false });
       generationId += 1;
       const live = [...arrows.values(), ...departing];
       for (const arrow of live) {
@@ -1236,17 +1237,24 @@
 
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
-    let pointerDown = null;
+    const HOLD_MS = 420;
+    const HOLD_MOVE_PX = 10;
+    /** @type {null | {
+     *   arrow: Arrow,
+     *   pointerId: number,
+     *   x: number,
+     *   y: number,
+     *   startedAt: number,
+     *   bodyEmissive: number,
+     *   headEmissive: number,
+     *   raf: number,
+     * }} */
+    let hold = null;
 
     function setPointerFromEvent(event) {
       const rect = renderer.domElement.getBoundingClientRect();
       pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
       pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-    }
-
-    function onPointerDown(event) {
-      if (event.button !== 0) return;
-      pointerDown = { x: event.clientX, y: event.clientY };
     }
 
     function findArrowFromHit(hitObject) {
@@ -1256,24 +1264,106 @@
       return arrows.get(obj.userData.arrowId) || null;
     }
 
-    function onPointerUp(event) {
-      if (event.button !== 0 || !pointerDown) return;
-      const dx = event.clientX - pointerDown.x;
-      const dy = event.clientY - pointerDown.y;
-      pointerDown = null;
-
-      if (Math.hypot(dx, dy) >= 5) return;
-      if (runOver || resultModal.classList.contains("visible")) return;
-
+    function arrowAtPointer(event) {
       setPointerFromEvent(event);
       raycaster.setFromCamera(pointer, camera);
       const hits = raycaster.intersectObjects(boardRoot.children, true);
       for (const hit of hits) {
         const arrow = findArrowFromHit(hit.object);
-        if (!arrow || arrow.busy) continue;
+        if (arrow && !arrow.busy) return arrow;
+      }
+      return null;
+    }
+
+    function restoreHoldVisual(state) {
+      const arrow = state.arrow;
+      if (!arrow.bodyMat || !arrow.headMat) return;
+      arrow.bodyMat.emissiveIntensity = state.bodyEmissive;
+      arrow.headMat.emissiveIntensity = state.headEmissive;
+      arrow.mesh.scale.setScalar(1);
+    }
+
+    function clearHold({ restore = true, releasePointer = true } = {}) {
+      if (!hold) return;
+      const state = hold;
+      hold = null;
+      cancelAnimationFrame(state.raf);
+      if (restore) restoreHoldVisual(state);
+      if (releasePointer) {
+        try {
+          if (renderer.domElement.hasPointerCapture(state.pointerId)) {
+            renderer.domElement.releasePointerCapture(state.pointerId);
+          }
+        } catch {
+          /* already released */
+        }
+      }
+    }
+
+    function tickHold(now) {
+      if (!hold) return;
+      const state = hold;
+      const arrow = state.arrow;
+      if (!arrows.has(arrow.id) || arrow.busy || runOver) {
+        clearHold();
+        return;
+      }
+      const progress = Math.min(1, (now - state.startedAt) / HOLD_MS);
+      arrow.bodyMat.emissiveIntensity = state.bodyEmissive + progress * 0.55;
+      arrow.headMat.emissiveIntensity = state.headEmissive + progress * 0.45;
+      const scale = 1 + progress * 0.07;
+      arrow.mesh.scale.setScalar(scale);
+
+      if (progress >= 1) {
+        clearHold({ restore: false });
+        arrow.mesh.scale.setScalar(1);
         tryRemove(arrow);
         return;
       }
+      state.raf = requestAnimationFrame(tickHold);
+    }
+
+    function onPointerDown(event) {
+      if (event.button !== 0) return;
+      clearHold();
+      if (runOver || resultModal.classList.contains("visible")) return;
+
+      const arrow = arrowAtPointer(event);
+      if (!arrow) return;
+
+      try {
+        renderer.domElement.setPointerCapture(event.pointerId);
+      } catch {
+        /* capture optional */
+      }
+
+      hold = {
+        arrow,
+        pointerId: event.pointerId,
+        x: event.clientX,
+        y: event.clientY,
+        startedAt: performance.now(),
+        bodyEmissive: arrow.bodyMat.emissiveIntensity,
+        headEmissive: arrow.headMat.emissiveIntensity,
+        raf: 0,
+      };
+      hold.raf = requestAnimationFrame(tickHold);
+    }
+
+    function onPointerMove(event) {
+      if (!hold || event.pointerId !== hold.pointerId) return;
+      const dx = event.clientX - hold.x;
+      const dy = event.clientY - hold.y;
+      if (Math.hypot(dx, dy) >= HOLD_MOVE_PX) clearHold();
+    }
+
+    function onPointerUp(event) {
+      if (event.button !== 0) return;
+      if (hold && event.pointerId === hold.pointerId) clearHold();
+    }
+
+    function onPointerCancel(event) {
+      if (hold && event.pointerId === hold.pointerId) clearHold();
     }
 
     function autoSolveStep() {
@@ -1309,10 +1399,9 @@
     };
 
     renderer.domElement.addEventListener("pointerdown", onPointerDown);
+    renderer.domElement.addEventListener("pointermove", onPointerMove);
     renderer.domElement.addEventListener("pointerup", onPointerUp);
-    renderer.domElement.addEventListener("pointercancel", () => {
-      pointerDown = null;
-    });
+    renderer.domElement.addEventListener("pointercancel", onPointerCancel);
 
     resetBtn.addEventListener("click", (e) => {
       e.preventDefault();
