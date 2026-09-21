@@ -369,7 +369,7 @@ class Frontier {
 
 const GRID = 10;
 const CELL = 1.15;
-const PALETTE_SIZE = 6;
+const PALETTE_SIZE = 8;
 const MIN_LEN = 3;
 let MAX_LEN = 10; // overridden by --max-len
 let TURN_BIAS = 0.7; // overridden by --turn-bias
