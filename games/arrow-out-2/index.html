@@ -654,13 +654,10 @@
     const cubeEdge = CELL * 0.32;
     const headHeight = cubeEdge * 1.25;
     const cubeGeometry = new THREE.BoxGeometry(cubeEdge, cubeEdge, cubeEdge);
-    // Full-cell pick volumes so the ray hits the front occupied cell instead of
-    // slipping through the thin visual meshes into an arrow behind.
-    const hitGeometry = new THREE.BoxGeometry(
-      CELL * 0.98,
-      CELL * 0.98,
-      CELL * 0.98
-    );
+    // Modest pick pads around each segment — large enough to aim, small enough
+    // that empty cell air stays click-through to arrows visible behind.
+    const hitPad = cubeEdge * 1.9;
+    const hitGeometry = new THREE.BoxGeometry(hitPad, hitPad, hitPad);
     const hitMaterial = new THREE.MeshBasicMaterial({
       transparent: true,
       opacity: 0,
@@ -881,7 +878,6 @@
         const geometry = i === 0 ? coneGeometry : cubeGeometry;
         const cube = new THREE.Mesh(geometry, i === 0 ? headMat : bodyMat);
         cube.position.copy(cellCenter(ix, iy, iz));
-        cube.raycast = noRaycast;
         group.add(cube);
         attachEdgeLines(cube, geometry, group);
         cubes.push(cube);
@@ -897,7 +893,6 @@
       const connectors = [];
       for (let i = 0; i < cells.length - 1; i++) {
         const connector = new THREE.Mesh(connectorGeometry, bodyMat);
-        connector.raycast = noRaycast;
         attachEdgeLines(connector, connectorGeometry, group);
         placeConnector(connector, cubes[i].position, cubes[i + 1].position);
         group.add(connector);
@@ -1291,7 +1286,8 @@
     }
 
     function findArrowFromHit(hitObject) {
-      if (!hitObject.userData?.isHitProxy) return null;
+      // Edge strokes are not pick targets; everything else in an arrow group is.
+      if (hitObject.isLineSegments) return null;
       let obj = hitObject;
       while (obj && obj.parent !== boardRoot) obj = obj.parent;
       if (!obj || obj.userData.arrowId == null) return null;
@@ -1301,6 +1297,8 @@
     function arrowAtPointer(event) {
       setPointerFromEvent(event);
       raycaster.setFromCamera(pointer, camera);
+      // Hits are nearest-first. Visual meshes + modest pads pick the arrow you
+      // see; empty air between snakes is not solid, so deeper pieces stay reachable.
       const hits = raycaster.intersectObjects(boardRoot.children, true);
       for (const hit of hits) {
         const arrow = findArrowFromHit(hit.object);
