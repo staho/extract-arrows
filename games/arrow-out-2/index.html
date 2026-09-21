@@ -36,12 +36,26 @@
         radial-gradient(1200px 800px at 15% 10%, #e8f8f3 0%, transparent 55%),
         radial-gradient(1000px 700px at 90% 80%, #d0ebf8 0%, transparent 50%),
         linear-gradient(145deg, var(--bg0), var(--bg1));
+      /* Keep long-presses on the board from becoming browser text selection. */
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    input, textarea {
+      user-select: text;
+      -webkit-user-select: text;
     }
 
     #app {
       position: absolute;
       inset: 0;
       z-index: 0;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
     }
 
     canvas {
@@ -50,6 +64,11 @@
       height: 100%;
       outline: none;
       cursor: grab;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      -webkit-tap-highlight-color: transparent;
     }
 
     canvas:active {
@@ -251,6 +270,8 @@
       border: 1px solid rgba(255, 255, 255, 0.65);
       pointer-events: none;
       opacity: 0.9;
+      user-select: none;
+      -webkit-user-select: none;
     }
 
     #result-modal {
@@ -1336,6 +1357,8 @@
 
     function onPointerDown(event) {
       if (event.button !== 0) return;
+      // Stop mobile browsers from treating a hold/drag as text selection.
+      event.preventDefault();
       clearHold();
       if (runOver || resultModal.classList.contains("visible")) return;
 
@@ -1409,10 +1432,14 @@
         })),
     };
 
-    renderer.domElement.addEventListener("pointerdown", onPointerDown);
+    renderer.domElement.addEventListener("pointerdown", onPointerDown, {
+      passive: false,
+    });
     renderer.domElement.addEventListener("pointermove", onPointerMove);
     renderer.domElement.addEventListener("pointerup", onPointerUp);
     renderer.domElement.addEventListener("pointercancel", onPointerCancel);
+    renderer.domElement.addEventListener("selectstart", (e) => e.preventDefault());
+    renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
 
     resetBtn.addEventListener("click", (e) => {
       e.preventDefault();
