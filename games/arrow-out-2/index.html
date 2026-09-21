@@ -103,6 +103,65 @@
       min-width: 88px;
     }
 
+    #settings-wrap {
+      position: relative;
+      z-index: 12;
+    }
+
+    #settings-btn {
+      min-width: 40px;
+      padding: 8px 10px;
+      background: rgba(42, 157, 143, 0.14);
+      color: var(--ink);
+      font-size: 1.05rem;
+      line-height: 1;
+    }
+
+    #settings-btn:hover,
+    #settings-btn[aria-expanded="true"] {
+      background: rgba(42, 157, 143, 0.26);
+    }
+
+    #settings-panel {
+      position: absolute;
+      top: calc(100% + 10px);
+      right: 0;
+      width: min(260px, calc(100vw - 32px));
+      padding: 14px 16px;
+      background: var(--panel);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.7);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      color: var(--ink);
+    }
+
+    #settings-panel[hidden] {
+      display: none;
+    }
+
+    #settings-panel .settings-label {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-bottom: 10px;
+    }
+
+    #settings-panel .settings-label span {
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+      font-weight: 700;
+    }
+
+    #hold-slider {
+      width: 100%;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+
     #hud .brand {
       font-weight: 700;
       font-size: 1rem;
@@ -187,6 +246,7 @@
     }
 
     #day-nav button:focus-visible,
+    #settings-btn:focus-visible,
     #reset-btn:focus-visible,
     #play-again-btn:focus-visible,
     #score-submit:focus-visible {
@@ -222,6 +282,15 @@
       #reset-btn {
         min-width: 0;
         padding: 8px 14px;
+      }
+
+      #settings-btn {
+        min-width: 36px;
+        padding: 8px 8px;
+      }
+
+      #settings-panel {
+        right: -4px;
       }
 
       #lives {
@@ -459,6 +528,33 @@
     </span>
     <span id="timer">0:00</span>
     <span id="remaining">Remaining: <strong>0</strong></span>
+    <div id="settings-wrap">
+      <button
+        type="button"
+        id="settings-btn"
+        aria-label="Settings"
+        aria-expanded="false"
+        aria-controls="settings-panel"
+      >
+        ⚙️
+      </button>
+      <div id="settings-panel" hidden role="dialog" aria-label="Settings">
+        <div class="settings-label">
+          <label for="hold-slider">Hold to release</label>
+          <span id="hold-value">300ms</span>
+        </div>
+        <input
+          type="range"
+          id="hold-slider"
+          min="0"
+          max="350"
+          step="10"
+          value="300"
+          aria-valuemin="0"
+          aria-valuemax="350"
+        />
+      </div>
+    </div>
     <button type="button" id="reset-btn">Reset</button>
   </div>
 
@@ -520,6 +616,9 @@
     const HALF = GRID / 2;
     const MAX_LIVES = 3;
     const NAME_KEY = "arrow-out-2-name";
+    const HOLD_KEY = "arrow-out-2-hold-ms";
+    const HOLD_DEFAULT = 300;
+    const HOLD_MAX = 350;
 
     const params = new URLSearchParams(window.location.search);
     const rawDev = params.get("dev");
@@ -528,6 +627,11 @@
     const appEl = document.getElementById("app");
     const remainingEl = document.querySelector("#remaining strong");
     const resetBtn = document.getElementById("reset-btn");
+    const settingsBtn = document.getElementById("settings-btn");
+    const settingsPanel = document.getElementById("settings-panel");
+    const holdSlider = document.getElementById("hold-slider");
+    const holdValueEl = document.getElementById("hold-value");
+    const hintEl = document.getElementById("hint");
     const playAgainBtn = document.getElementById("play-again-btn");
     const resultModal = document.getElementById("result-modal");
     const resultTitle = document.getElementById("result-title");
@@ -1265,8 +1369,50 @@
 
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
-    const HOLD_MS = 420;
     const HOLD_MOVE_PX = 10;
+
+    function loadHoldMs() {
+      try {
+        const raw = localStorage.getItem(HOLD_KEY);
+        if (raw == null) return HOLD_DEFAULT;
+        const n = Number(raw);
+        if (!Number.isFinite(n)) return HOLD_DEFAULT;
+        return Math.min(HOLD_MAX, Math.max(0, Math.round(n)));
+      } catch {
+        return HOLD_DEFAULT;
+      }
+    }
+
+    let holdMs = loadHoldMs();
+
+    function formatHoldMs(ms) {
+      return ms <= 0 ? "0ms (tap)" : `${ms}ms`;
+    }
+
+    function updateHoldHint() {
+      hintEl.textContent =
+        holdMs <= 0
+          ? "Drag to orbit · Tap an arrow to remove it"
+          : "Drag to orbit · Hold an arrow to remove it";
+    }
+
+    function setHoldMs(ms, { persist = true } = {}) {
+      holdMs = Math.min(HOLD_MAX, Math.max(0, Math.round(ms)));
+      holdSlider.value = String(holdMs);
+      holdSlider.setAttribute("aria-valuenow", String(holdMs));
+      holdValueEl.textContent = formatHoldMs(holdMs);
+      updateHoldHint();
+      if (persist) {
+        try {
+          localStorage.setItem(HOLD_KEY, String(holdMs));
+        } catch {
+          /* ignore quota / private mode */
+        }
+      }
+    }
+
+    setHoldMs(holdMs, { persist: false });
+
     /** @type {null | {
      *   arrow: Arrow,
      *   pointerId: number,
@@ -1339,7 +1485,9 @@
         clearHold();
         return;
       }
-      const progress = Math.min(1, (now - state.startedAt) / HOLD_MS);
+      const duration = Math.max(holdMs, 1);
+      const progress =
+        holdMs <= 0 ? 1 : Math.min(1, (now - state.startedAt) / duration);
       // Glow only — avoid scaling the group (that expands around the world
       // origin and makes neighboring pieces look like they "started").
       arrow.bodyMat.emissiveIntensity = state.bodyEmissive + progress * 0.7;
@@ -1362,6 +1510,11 @@
 
       const arrow = arrowAtPointer(event);
       if (!arrow) return;
+
+      if (holdMs <= 0) {
+        tryRemove(arrow);
+        return;
+      }
 
       try {
         renderer.domElement.setPointerCapture(event.pointerId);
@@ -1447,6 +1600,41 @@
         [{ transform: "scale(1)" }, { transform: "scale(1.2)" }, { transform: "scale(1)" }],
         { duration: 280 }
       );
+    });
+
+    function setSettingsOpen(open) {
+      settingsPanel.hidden = !open;
+      settingsBtn.setAttribute("aria-expanded", open ? "true" : "false");
+    }
+
+    settingsBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setSettingsOpen(settingsPanel.hidden);
+    });
+
+    settingsPanel.addEventListener("pointerdown", (e) => e.stopPropagation());
+    settingsPanel.addEventListener("click", (e) => e.stopPropagation());
+
+    holdSlider.addEventListener("input", () => {
+      setHoldMs(Number(holdSlider.value));
+    });
+
+    document.addEventListener("pointerdown", (e) => {
+      if (settingsPanel.hidden) return;
+      const t = e.target;
+      if (
+        t === settingsBtn ||
+        settingsBtn.contains(t) ||
+        settingsPanel.contains(t)
+      ) {
+        return;
+      }
+      setSettingsOpen(false);
+    });
+
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !settingsPanel.hidden) setSettingsOpen(false);
     });
     playAgainBtn.addEventListener("click", (e) => {
       e.preventDefault();
