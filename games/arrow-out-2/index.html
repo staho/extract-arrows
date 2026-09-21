@@ -617,18 +617,21 @@
 
     setGridVisible(DEV_MODE);
 
-    // Vibrant palette shared across arrows. Colours repeat (palette kept small);
-    // an arrow's colour is just cosmetic and comes from the JSON.
+    // Vibrant palette shared across arrows. Colours repeat; an arrow's colour
+    // is cosmetic and comes from the JSON (index modulo palette length).
     const PALETTE = [
-      0xff3b3b, // red
-      0xff9f1c, // orange
-      0xffd23f, // yellow
-      0x2ec4b6, // teal
-      0x3a86ff, // blue
-      0x8338ec, // purple
+      0xff1e1e, // hot red
+      0xff7a00, // vivid orange
+      0xffe600, // bright yellow
+      0x00e5a0, // lime mint
+      0x00c2ff, // cyan blue
+      0x3d5afe, // electric blue
+      0xb517ff, // magenta purple
+      0xff2d95, // hot pink
     ];
 
     const cubeEdge = CELL * 0.32;
+    const headHeight = cubeEdge * 1.25;
     const cubeGeometry = new THREE.BoxGeometry(cubeEdge, cubeEdge, cubeEdge);
     const hitGeometry = new THREE.BoxGeometry(
       cubeEdge * 1.35,
@@ -638,6 +641,13 @@
     const hitMaterial = new THREE.MeshBasicMaterial({
       transparent: true,
       opacity: 0,
+      depthWrite: false,
+    });
+    // Dark edge strokes help packed snakes separate when hues sit side by side.
+    const edgeMaterial = new THREE.LineBasicMaterial({
+      color: 0x1a1f2e,
+      transparent: true,
+      opacity: 0.55,
       depthWrite: false,
     });
     const cellMin = -HALF * CELL;
@@ -660,6 +670,7 @@
       const dist = _connDelta.length();
       if (dist < cubeEdge * 0.15) {
         mesh.visible = false;
+        if (mesh.userData.edgeLines) mesh.userData.edgeLines.visible = false;
         return;
       }
       mesh.visible = true;
@@ -669,13 +680,34 @@
         CONN_AXIS,
         _connDelta.multiplyScalar(1 / dist)
       );
+      if (mesh.userData.edgeLines) {
+        const edges = mesh.userData.edgeLines;
+        edges.visible = true;
+        edges.position.copy(mesh.position);
+        edges.quaternion.copy(mesh.quaternion);
+        edges.scale.copy(mesh.scale);
+      }
     }
 
-    // Square pyramid head: same cubeEdge box as a body cube. Radius is
+    function attachEdgeLines(mesh, geometry, parent) {
+      const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(geometry),
+        edgeMaterial
+      );
+      edges.position.copy(mesh.position);
+      edges.quaternion.copy(mesh.quaternion);
+      edges.scale.copy(mesh.scale);
+      mesh.userData.edgeLines = edges;
+      parent.add(edges);
+      return edges;
+    }
+
+    // Square pyramid head: base matches the body cube footprint; taller tip
+    // so the pointing end reads clearly in a packed board. Radius is
     // center-to-vertex so a 45° yaw makes the square sides match the cube.
     const coneGeometry = new THREE.ConeGeometry(
       cubeEdge / Math.SQRT2,
-      cubeEdge,
+      headHeight,
       4
     );
     coneGeometry.rotateY(Math.PI / 4);
@@ -722,7 +754,7 @@
      */
 
     function tintHeadColor(hex) {
-      return new THREE.Color(hex).lerp(new THREE.Color(0xffffff), 0.4);
+      return new THREE.Color(hex).lerp(new THREE.Color(0xffffff), 0.2);
     }
 
     /** World position along an arrow's snake path. `s` is in cell units. */
@@ -744,6 +776,15 @@
       );
     }
 
+    function syncEdgeLines(mesh) {
+      const edges = mesh.userData.edgeLines;
+      if (!edges) return;
+      edges.visible = mesh.visible;
+      edges.position.copy(mesh.position);
+      edges.quaternion.copy(mesh.quaternion);
+      edges.scale.copy(mesh.scale);
+    }
+
     function layoutArrow(arrow, t) {
       const unit = arrow.dir;
       const cubes = arrow.cubes;
@@ -751,6 +792,7 @@
         pathPoint(arrow.cells, unit, t - i, cubes[i].position);
       }
       cubes[0].quaternion.setFromUnitVectors(CONE_UP, unit);
+      for (const cube of cubes) syncEdgeLines(cube);
       for (let i = 0; i < arrow.connectors.length; i++) {
         placeConnector(
           arrow.connectors[i],
@@ -782,18 +824,21 @@
       if (!cells || cells.length < 2) return;
 
       const colorHex = PALETTE[data.color % PALETTE.length];
+      const bodyColor = new THREE.Color(colorHex);
       const bodyMat = new THREE.MeshStandardMaterial({
-        color: colorHex,
-        roughness: 0.45,
-        metalness: 0.1,
+        color: bodyColor,
+        roughness: 0.38,
+        metalness: 0.12,
+        emissive: bodyColor.clone(),
+        emissiveIntensity: 0.1,
       });
       const headTint = tintHeadColor(colorHex);
       const headMat = new THREE.MeshStandardMaterial({
         color: headTint,
-        roughness: 0.22,
-        metalness: 0.35,
+        roughness: 0.18,
+        metalness: 0.4,
         emissive: headTint.clone(),
-        emissiveIntensity: 0.16,
+        emissiveIntensity: 0.28,
       });
 
       const group = new THREE.Group();
@@ -808,6 +853,7 @@
         const cube = new THREE.Mesh(geometry, i === 0 ? headMat : bodyMat);
         cube.position.copy(cellCenter(ix, iy, iz));
         group.add(cube);
+        attachEdgeLines(cube, geometry, group);
         cubes.push(cube);
 
         const hit = new THREE.Mesh(hitGeometry, hitMaterial);
@@ -820,6 +866,7 @@
       const connectors = [];
       for (let i = 0; i < cells.length - 1; i++) {
         const connector = new THREE.Mesh(connectorGeometry, bodyMat);
+        attachEdgeLines(connector, connectorGeometry, group);
         placeConnector(connector, cubes[i].position, cubes[i + 1].position);
         group.add(connector);
         connectors.push(connector);
@@ -861,6 +908,10 @@
       gsap.killTweensOf(arrow.headMat.color);
       arrow.bodyMat.dispose();
       arrow.headMat.dispose();
+      for (const mesh of [...arrow.cubes, ...arrow.connectors]) {
+        const edges = mesh.userData.edgeLines;
+        if (edges && edges.geometry) edges.geometry.dispose();
+      }
     }
 
     function clearBoard() {
