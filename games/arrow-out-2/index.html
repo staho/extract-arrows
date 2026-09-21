@@ -541,7 +541,7 @@
       <div id="settings-panel" hidden role="dialog" aria-label="Settings">
         <div class="settings-label">
           <label for="hold-slider">Hold to release</label>
-          <span id="hold-value">300ms</span>
+          <span id="hold-value">60ms</span>
         </div>
         <input
           type="range"
@@ -549,7 +549,7 @@
           min="0"
           max="350"
           step="10"
-          value="300"
+          value="60"
           aria-valuemin="0"
           aria-valuemax="350"
         />
@@ -617,7 +617,7 @@
     const MAX_LIVES = 3;
     const NAME_KEY = "arrow-out-2-name";
     const HOLD_KEY = "arrow-out-2-hold-ms";
-    const HOLD_DEFAULT = 300;
+    const HOLD_DEFAULT = 60;
     const HOLD_MAX = 350;
 
     const params = new URLSearchParams(window.location.search);
