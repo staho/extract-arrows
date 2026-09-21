@@ -633,16 +633,19 @@
     const cubeEdge = CELL * 0.32;
     const headHeight = cubeEdge * 1.25;
     const cubeGeometry = new THREE.BoxGeometry(cubeEdge, cubeEdge, cubeEdge);
+    // Full-cell pick volumes so the ray hits the front occupied cell instead of
+    // slipping through the thin visual meshes into an arrow behind.
     const hitGeometry = new THREE.BoxGeometry(
-      cubeEdge * 1.35,
-      cubeEdge * 1.35,
-      cubeEdge * 1.35
+      CELL * 0.98,
+      CELL * 0.98,
+      CELL * 0.98
     );
     const hitMaterial = new THREE.MeshBasicMaterial({
       transparent: true,
       opacity: 0,
       depthWrite: false,
     });
+    const noRaycast = () => {};
     // Dark edge strokes help packed snakes separate when hues sit side by side.
     const edgeMaterial = new THREE.LineBasicMaterial({
       color: 0x1a1f2e,
@@ -697,6 +700,7 @@
       edges.position.copy(mesh.position);
       edges.quaternion.copy(mesh.quaternion);
       edges.scale.copy(mesh.scale);
+      edges.raycast = noRaycast;
       mesh.userData.edgeLines = edges;
       parent.add(edges);
       return edges;
@@ -745,6 +749,7 @@
      *   mesh: THREE.Group,
      *   cubes: THREE.Mesh[],
      *   connectors: THREE.Mesh[],
+     *   hits: THREE.Mesh[],
      *   tweenTarget: { t: number },
      *   busy: boolean,
      *   bodyMat: THREE.MeshStandardMaterial,
@@ -790,6 +795,7 @@
       const cubes = arrow.cubes;
       for (let i = 0; i < cubes.length; i++) {
         pathPoint(arrow.cells, unit, t - i, cubes[i].position);
+        if (arrow.hits[i]) arrow.hits[i].position.copy(cubes[i].position);
       }
       cubes[0].quaternion.setFromUnitVectors(CONE_UP, unit);
       for (const cube of cubes) syncEdgeLines(cube);
@@ -847,11 +853,14 @@
 
       /** @type {THREE.Mesh[]} */
       const cubes = [];
+      /** @type {THREE.Mesh[]} */
+      const hits = [];
       for (let i = 0; i < cells.length; i++) {
         const [ix, iy, iz] = cells[i];
         const geometry = i === 0 ? coneGeometry : cubeGeometry;
         const cube = new THREE.Mesh(geometry, i === 0 ? headMat : bodyMat);
         cube.position.copy(cellCenter(ix, iy, iz));
+        cube.raycast = noRaycast;
         group.add(cube);
         attachEdgeLines(cube, geometry, group);
         cubes.push(cube);
@@ -860,12 +869,14 @@
         hit.position.copy(cube.position);
         hit.userData.isHitProxy = true;
         group.add(hit);
+        hits.push(hit);
       }
 
       /** @type {THREE.Mesh[]} */
       const connectors = [];
       for (let i = 0; i < cells.length - 1; i++) {
         const connector = new THREE.Mesh(connectorGeometry, bodyMat);
+        connector.raycast = noRaycast;
         attachEdgeLines(connector, connectorGeometry, group);
         placeConnector(connector, cubes[i].position, cubes[i + 1].position);
         group.add(connector);
@@ -888,6 +899,7 @@
         mesh: group,
         cubes,
         connectors,
+        hits,
         tweenTarget: { t: 0 },
         busy: false,
         bodyMat,
@@ -1258,6 +1270,7 @@
     }
 
     function findArrowFromHit(hitObject) {
+      if (!hitObject.userData?.isHitProxy) return null;
       let obj = hitObject;
       while (obj && obj.parent !== boardRoot) obj = obj.parent;
       if (!obj || obj.userData.arrowId == null) return null;
@@ -1280,7 +1293,6 @@
       if (!arrow.bodyMat || !arrow.headMat) return;
       arrow.bodyMat.emissiveIntensity = state.bodyEmissive;
       arrow.headMat.emissiveIntensity = state.headEmissive;
-      arrow.mesh.scale.setScalar(1);
     }
 
     function clearHold({ restore = true, releasePointer = true } = {}) {
@@ -1309,14 +1321,13 @@
         return;
       }
       const progress = Math.min(1, (now - state.startedAt) / HOLD_MS);
-      arrow.bodyMat.emissiveIntensity = state.bodyEmissive + progress * 0.55;
-      arrow.headMat.emissiveIntensity = state.headEmissive + progress * 0.45;
-      const scale = 1 + progress * 0.07;
-      arrow.mesh.scale.setScalar(scale);
+      // Glow only — avoid scaling the group (that expands around the world
+      // origin and makes neighboring pieces look like they "started").
+      arrow.bodyMat.emissiveIntensity = state.bodyEmissive + progress * 0.7;
+      arrow.headMat.emissiveIntensity = state.headEmissive + progress * 0.55;
 
       if (progress >= 1) {
         clearHold({ restore: false });
-        arrow.mesh.scale.setScalar(1);
         tryRemove(arrow);
         return;
       }
