@@ -1369,7 +1369,11 @@
 
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
-    const HOLD_MOVE_PX = 10;
+    // Past this, the gesture is an orbit and must not remove an arrow.
+    const DRAG_PX = 8;
+    // Travel under the drag threshold still restarts the hold, so a slow
+    // rotate cannot finish a short hold. Smaller twitches do not.
+    const STILL_RESET_PX = 4;
 
     function loadHoldMs() {
       try {
@@ -1418,6 +1422,10 @@
      *   pointerId: number,
      *   x: number,
      *   y: number,
+     *   lastX: number,
+     *   lastY: number,
+     *   pendingTravel: number,
+     *   dragged: boolean,
      *   startedAt: number,
      *   bodyEmissive: number,
      *   headEmissive: number,
@@ -1478,7 +1486,7 @@
     }
 
     function tickHold(now) {
-      if (!hold) return;
+      if (!hold || hold.dragged || holdMs <= 0) return;
       const state = hold;
       const arrow = state.arrow;
       if (!arrows.has(arrow.id) || arrow.busy || runOver) {
@@ -1486,8 +1494,7 @@
         return;
       }
       const duration = Math.max(holdMs, 1);
-      const progress =
-        holdMs <= 0 ? 1 : Math.min(1, (now - state.startedAt) / duration);
+      const progress = Math.min(1, (now - state.startedAt) / duration);
       // Glow only — avoid scaling the group (that expands around the world
       // origin and makes neighboring pieces look like they "started").
       arrow.bodyMat.emissiveIntensity = state.bodyEmissive + progress * 0.7;
@@ -1511,11 +1518,6 @@
       const arrow = arrowAtPointer(event);
       if (!arrow) return;
 
-      if (holdMs <= 0) {
-        tryRemove(arrow);
-        return;
-      }
-
       try {
         renderer.domElement.setPointerCapture(event.pointerId);
       } catch {
@@ -1527,24 +1529,54 @@
         pointerId: event.pointerId,
         x: event.clientX,
         y: event.clientY,
+        lastX: event.clientX,
+        lastY: event.clientY,
+        pendingTravel: 0,
+        dragged: false,
         startedAt: performance.now(),
         bodyEmissive: arrow.bodyMat.emissiveIntensity,
         headEmissive: arrow.headMat.emissiveIntensity,
         raf: 0,
       };
-      hold.raf = requestAnimationFrame(tickHold);
+      if (holdMs > 0) hold.raf = requestAnimationFrame(tickHold);
     }
 
     function onPointerMove(event) {
-      if (!hold || event.pointerId !== hold.pointerId) return;
+      if (!hold || event.pointerId !== hold.pointerId || hold.dragged) return;
       const dx = event.clientX - hold.x;
       const dy = event.clientY - hold.y;
-      if (Math.hypot(dx, dy) >= HOLD_MOVE_PX) clearHold();
+      if (Math.hypot(dx, dy) >= DRAG_PX) {
+        hold.dragged = true;
+        clearHold();
+        return;
+      }
+
+      const step = Math.hypot(event.clientX - hold.lastX, event.clientY - hold.lastY);
+      hold.lastX = event.clientX;
+      hold.lastY = event.clientY;
+      hold.pendingTravel += step;
+      if (hold.pendingTravel < STILL_RESET_PX) return;
+      hold.pendingTravel = 0;
+      hold.startedAt = performance.now();
     }
 
     function onPointerUp(event) {
       if (event.button !== 0) return;
-      if (hold && event.pointerId === hold.pointerId) clearHold();
+      if (!hold || event.pointerId !== hold.pointerId) return;
+      const state = hold;
+      const travel = Math.hypot(event.clientX - state.x, event.clientY - state.y);
+      const arrow = state.arrow;
+      const tapped = holdMs <= 0 && !state.dragged && travel < DRAG_PX;
+      clearHold();
+      if (
+        tapped &&
+        arrows.has(arrow.id) &&
+        !arrow.busy &&
+        !runOver &&
+        !resultModal.classList.contains("visible")
+      ) {
+        tryRemove(arrow);
+      }
     }
 
     function onPointerCancel(event) {
